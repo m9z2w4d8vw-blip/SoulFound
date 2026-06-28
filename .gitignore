@@ -1,0 +1,13 @@
+# Xcode build output
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+Payload/
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
