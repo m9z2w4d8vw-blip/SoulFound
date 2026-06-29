@@ -221,9 +221,11 @@ private extension Data {
 
     func readUInt32(at offset: Int) -> UInt32 {
         guard offset + 4 <= count else { return 0 }
-        return subdata(in: offset..<offset+4).withUnsafeBytes {
-            $0.load(as: UInt32.self).littleEndian
-        }
+        let b0 = UInt32(self[offset])
+        let b1 = UInt32(self[offset + 1])
+        let b2 = UInt32(self[offset + 2])
+        let b3 = UInt32(self[offset + 3])
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     func readSlskString(at offset: inout Int) -> String? {
