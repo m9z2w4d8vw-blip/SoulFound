@@ -187,26 +187,44 @@ class SoulseekClient: ObservableObject {
     /// to trap, even on a fully desynced/garbage stream (worst case: we clear the buffer
     /// and wait for the connection to resync naturally on the next message boundary).
     private func processBuffer() {
-        while receiveBuffer.count >= 4 {
-            let msgLength = Int(receiveBuffer.readUInt32(at: 0))
+    // Make contiguous to avoid subscript traps on sliced Data
+    var buf = Data(receiveBuffer)
+    receiveBuffer = Data()
 
-            // Every real Soulseek message has at least a 4-byte code, so anything
-            // below that (or absurdly large) means we've lost sync with the stream.
-            guard msgLength >= 4, msgLength <= 50_000_000 else {
-                receiveBuffer.removeAll()
-                return
-            }
+    while buf.count >= 4 {
+        let b0 = UInt32(buf[0])
+        let b1 = UInt32(buf[1])
+        let b2 = UInt32(buf[2])
+        let b3 = UInt32(buf[3])
+        let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
 
-            let totalNeeded = 4 + msgLength
-            guard receiveBuffer.count >= totalNeeded else { break }
-
-            let code = receiveBuffer.readUInt32(at: 4)
-            let body = totalNeeded > 8 ? Data(receiveBuffer[8..<totalNeeded]) : Data()
-
-            receiveBuffer.removeFirst(totalNeeded)
-            handleMessage(code: code, body: body)
+        guard msgLength >= 4, msgLength <= 50_000_000 else {
+            return
         }
+
+        let totalNeeded = 4 + msgLength
+        guard buf.count >= totalNeeded else {
+            receiveBuffer = buf  // save remainder
+            return
+        }
+
+        let code: UInt32
+        if buf.count >= 8 {
+            let c0 = UInt32(buf[4])
+            let c1 = UInt32(buf[5])
+            let c2 = UInt32(buf[6])
+            let c3 = UInt32(buf[7])
+            code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+        } else {
+            buf = Data(buf.dropFirst(totalNeeded))
+            continue
+        }
+
+        let body = totalNeeded > 8 ? Data(buf[8..<totalNeeded]) : Data()
+        buf = Data(buf.dropFirst(totalNeeded))
+        handleMessage(code: code, body: body)
     }
+}
 
     private func handleMessage(code: UInt32, body: Data) {
         switch code {
