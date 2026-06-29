@@ -75,16 +75,14 @@ class PeerConnectionManager {
     }
 
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
-    // Send PeerInit (code 1) not PierceFireWall (code 0)
-    // PeerInit tells the peer: "I am username, connecting for type P, token X"
     var body = Data()
-    body.appendSlskString("musicListener") // your username
-    body.appendSlskString("P")             // connection type: P = peer
+    body.appendSlskString("musicListener")
+    body.appendSlskString("P")
     body.appendUInt32(token)
 
     var msg = Data()
-    msg.appendUInt32(UInt32(1 + body.count)) // length field
-    msg.append(1)                            // peer init code 1 = PeerInit
+    msg.appendUInt32(UInt32(4 + body.count)) // 4 bytes for code + body
+    msg.appendUInt32(1)                      // peer init code as UInt32
     msg.append(body)
 
     conn.send(content: msg, completion: .idempotent)
