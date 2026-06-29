@@ -2,18 +2,15 @@ import Foundation
 import Network
 import Compression
 
-// MARK: - PeerConnectionManager
-/// Handles outbound peer connections for receiving search results.
-/// When the server sends us a ConnectToPeer (code 18), we dial out to the peer,
-/// send PierceFireWall to identify ourselves, then wait for their FileSearchResult.
-@MainActor
 // MARK: - DebugLog
-class DebugLog {
+class DebugLog: @unchecked Sendable {
     static let shared = DebugLog()
     private let fileURL: URL
+    let fileURLPublic: URL
     private init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         fileURL = docs.appendingPathComponent("soulfound_debug.txt")
+        fileURLPublic = fileURL
         try? "".write(to: fileURL, atomically: true, encoding: .utf8)
     }
     func log(_ message: String) {
@@ -24,55 +21,41 @@ class DebugLog {
             handle.write(data)
             handle.closeFile()
         }
-        print(line)
     }
 }
 
+// MARK: - PeerConnectionManager
+@MainActor
 class PeerConnectionManager {
 
-    /// Called on the main actor when results arrive. (token, results)
     var onSearchResults: (([SearchResult], UInt32) -> Void)?
-
-    /// The port we advertise to the server via SetWaitPort.
-    /// We use 0 here since we're not actually listening for inbound connections —
-    /// all our peer connections are outbound (triggered by ConnectToPeer from the server).
     let listenPort: Int = 0
-
-    // Active outbound peer connections, keyed by token
     private var activeConnections: [UInt32: NWConnection] = [:]
 
-    // MARK: - Listening (no-op for download-only client)
-
-    func startListening() {
-        // We don't open an inbound listener. The server will send us ConnectToPeer
-        // messages which we handle by dialing out to the peer ourselves.
-    }
-
-    // MARK: - Outbound connection to peer
+    func startListening() {}
 
     func connectOut(toIP ip: UInt32, port: UInt16, token: UInt32, peerUsername: String) {
-        // Convert uint32 IP (little-endian from Soulseek) to dotted-decimal
         let ipString = "\(ip & 0xFF).\((ip >> 8) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 24) & 0xFF)"
-
         guard port > 0 else { return }
-
         let host = NWEndpoint.Host(ipString)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
 
         let conn = NWConnection(host: host, port: nwPort, using: .tcp)
         activeConnections[token] = conn
-
-        var receiveBuffer = Data()
+        DebugLog.shared.log("Dialing peer \(peerUsername) at \(ipString):\(port) token:\(token)")
 
         conn.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    // Send PierceFireWall (peer code 0) with the token
+                    DebugLog.shared.log("Connected to peer token:\(token)")
                     self.sendPierceFireWall(conn: conn, token: token)
-                    self.receivePeer(conn: conn, buffer: &receiveBuffer, token: token)
-                case .failed, .cancelled:
+                    self.receivePeer(conn: conn, token: token)
+                case .failed(let err):
+                    DebugLog.shared.log("Peer connection failed token:\(token) err:\(err)")
+                    self.activeConnections.removeValue(forKey: token)
+                case .cancelled:
                     self.activeConnections.removeValue(forKey: token)
                 default:
                     break
@@ -81,9 +64,7 @@ class PeerConnectionManager {
         }
 
         conn.start(queue: .main)
-        DebugLog.shared.log("Dialing peer \(peerUsername) at \(ipString):\(port) token:\(token)")
 
-        // Time out after 15 seconds
         Task {
             try? await Task.sleep(nanoseconds: 15_000_000_000)
             if self.activeConnections[token] != nil {
@@ -93,28 +74,21 @@ class PeerConnectionManager {
         }
     }
 
-    // MARK: - PierceFireWall (peer init code 0)
-
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
         var body = Data()
         body.appendUInt32(token)
-
         var msg = Data()
-        msg.appendUInt32(UInt32(1 + 4)) // length: 1 byte code + 4 byte token
-        msg.append(0)                   // peer init code 0 = PierceFireWall
+        msg.appendUInt32(UInt32(1 + 4))
+        msg.append(0)
         msg.append(body)
-
         conn.send(content: msg, completion: .idempotent)
     }
 
-    // MARK: - Peer receive loop
-
-    private func receivePeer(conn: NWConnection, buffer: inout Data, token: UInt32) {
-        // Swift inout + async closure capture requires a workaround — use a class box
+    private func receivePeer(conn: NWConnection, token: UInt32) {
         let box = BufferBox()
 
         func doReceive() {
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     if let data {
@@ -134,22 +108,39 @@ class PeerConnectionManager {
         doReceive()
     }
 
-    // MARK: - Peer message parsing
-
     private func processPeerBuffer(box: BufferBox, conn: NWConnection, token: UInt32) {
-        while box.data.count >= 4 {
-            let msgLength = Int(box.data.readUInt32(at: 0))
+        var buf = Data(box.data)
+        box.data = Data()
+
+        while buf.count >= 4 {
+            let b0 = UInt32(buf[0]); let b1 = UInt32(buf[1])
+            let b2 = UInt32(buf[2]); let b3 = UInt32(buf[3])
+            let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+
             guard msgLength >= 4, msgLength <= 50_000_000 else {
-                box.data.removeAll()
+                DebugLog.shared.log("Peer bad msgLength:\(msgLength) token:\(token)")
                 return
             }
             let totalNeeded = 4 + msgLength
-            guard box.data.count >= totalNeeded else { break }
+            guard buf.count >= totalNeeded else {
+                box.data = buf
+                return
+            }
 
-            let code = box.data.readUInt32(at: 4)
-            let body = totalNeeded > 8 ? Data(box.data[8..<totalNeeded]) : Data()
-            box.data.removeFirst(totalNeeded)
+            let code: UInt32
+            if buf.count >= 8 {
+                let c0 = UInt32(buf[4]); let c1 = UInt32(buf[5])
+                let c2 = UInt32(buf[6]); let c3 = UInt32(buf[7])
+                code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+            } else {
+                buf = Data(buf.dropFirst(totalNeeded))
+                continue
+            }
 
+            let body = totalNeeded > 8 ? Data(buf[8..<totalNeeded]) : Data()
+            buf = Data(buf.dropFirst(totalNeeded))
+
+            DebugLog.shared.log("Peer msg code:\(code) size:\(body.count) token:\(token)")
             handlePeerMessage(code: code, body: body, token: token, conn: conn)
         }
     }
@@ -157,50 +148,45 @@ class PeerConnectionManager {
     private func handlePeerMessage(code: UInt32, body: Data, token: UInt32, conn: NWConnection) {
         switch code {
         case 9:
-            // FileSearchResult
-            DebugLog.shared.log("Got search result from \(senderUsername), token:\(resultToken), results to parse")
             handleSearchResult(body: body, token: token)
             conn.cancel()
             activeConnections.removeValue(forKey: token)
         default:
-            break
+            DebugLog.shared.log("Peer unknown code:\(code) token:\(token)")
         }
     }
 
-    // MARK: - FileSearchResult (peer code 9)
-
     private func handleSearchResult(body: Data, token: UInt32) {
-        // Body layout:
-        //   string  username
-        //   uint32  token
-        //   [rest]  zlib-compressed payload
         var offset = 0
-        guard let senderUsername = body.readSlskString(at: &offset) else { return }
+        guard let senderUsername = body.readSlskString(at: &offset) else {
+            DebugLog.shared.log("handleSearchResult: failed to read username")
+            return
+        }
         guard offset + 4 <= body.count else { return }
         let resultToken = body.readUInt32(at: offset); offset += 4
 
-        _ = senderUsername // used for attribution later
+        DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
 
-        // The rest is zlib-compressed. Soulseek uses raw deflate wrapped in a
-        // zlib header (2 bytes) and checksum (4 bytes). We strip both ends.
-        guard offset + 6 <= body.count else { return }
+        guard offset + 6 <= body.count else {
+            DebugLog.shared.log("Body too short for zlib, count:\(body.count) offset:\(offset)")
+            return
+        }
         let compressed = body.subdata(in: (offset + 2)..<(body.count - 4))
+        DebugLog.shared.log("Compressed size: \(compressed.count)")
+
         guard let decompressed = zlibDecompress(compressed) else { return }
+        DebugLog.shared.log("Decompressed size: \(decompressed.count)")
 
         let results = parseFileList(data: decompressed, username: senderUsername)
-        guard !results.isEmpty else { return }
+        DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
 
-        onSearchResults?(results, resultToken)
+        guard !results.isEmpty else { return }
+        onSearchResults?(results, token)
     }
 
-    // MARK: - zlib decompression (raw deflate)
-
     private func zlibDecompress(_ data: Data) -> Data? {
-        // We need raw deflate (no zlib header). Apple's Compression framework
-        // provides COMPRESSION_ZLIB which handles raw deflate directly.
-        let destinationSize = 10_000_000 // 10 MB cap
+        let destinationSize = 10_000_000
         var destination = Data(count: destinationSize)
-
         let result = data.withUnsafeBytes { srcPtr -> Int in
             guard let src = srcPtr.baseAddress else { return 0 }
             return destination.withUnsafeMutableBytes { dstPtr -> Int in
@@ -212,14 +198,12 @@ class PeerConnectionManager {
                 )
             }
         }
-
         guard result > 0 else {
-    DebugLog.shared.log("zlib decompress failed, input size: \(data.count)")
-    return nil
-}
+            DebugLog.shared.log("zlib decompress failed, input size: \(data.count)")
+            return nil
+        }
+        return destination.prefix(result)
     }
-
-    // MARK: - File list parser
 
     private func parseFileList(data: Data, username: String) -> [SearchResult] {
         var offset = 0
@@ -227,36 +211,25 @@ class PeerConnectionManager {
 
         guard offset + 4 <= data.count else { return results }
         let fileCount = Int(data.readUInt32(at: offset)); offset += 4
-
         guard fileCount > 0, fileCount < 10_000 else { return results }
 
         for _ in 0..<fileCount {
-            // Each file entry:
-            //   uint8   code (1 = file)
-            //   string  filename (full path, backslash-separated)
-            //   uint64  file size
-            //   string  extension
-            //   uint32  attribute count
-            //   [attributes: uint32 type, uint32 value] * count
-
             guard offset < data.count else { break }
-            offset += 1 // skip code byte
+            offset += 1
 
             guard let filename = data.readSlskString(at: &offset) else { break }
             guard offset + 8 <= data.count else { break }
 
-            // File size is uint64
             let lo = UInt64(data.readUInt32(at: offset)); offset += 4
             let hi = UInt64(data.readUInt32(at: offset)); offset += 4
             let fileSize = lo | (hi << 32)
 
-            guard let ext = data.readSlskString(at: &offset) else { break }
+            guard data.readSlskString(at: &offset) != nil else { break }
             guard offset + 4 <= data.count else { break }
             let attrCount = Int(data.readUInt32(at: offset)); offset += 4
 
             var bitrate: UInt32 = 0
             var duration: UInt32 = 0
-
             for _ in 0..<attrCount {
                 guard offset + 8 <= data.count else { break }
                 let attrType = data.readUInt32(at: offset); offset += 4
@@ -268,29 +241,22 @@ class PeerConnectionManager {
                 }
             }
 
-            _ = ext // available for display later
-
-            let result = SearchResult(
+            results.append(SearchResult(
                 username: username,
                 filename: filename,
                 size: Int64(fileSize),
                 bitrate: bitrate > 0 ? Int(bitrate) : nil,
                 duration: duration > 0 ? Int(duration) : nil,
                 remotePath: filename
-            )
+            ))
         }
-
         return results
     }
 }
 
-// MARK: - BufferBox
-// Simple reference-type wrapper so we can mutate a buffer inside async closures
 private class BufferBox: @unchecked Sendable {
     var data = Data()
 }
-
-// MARK: - Data extensions (shared helpers)
 
 extension Data {
     func readUInt32(at offset: Int) -> UInt32 {
@@ -312,8 +278,8 @@ extension Data {
 
     mutating func appendUInt32(_ value: UInt32) {
         let le = value.littleEndian
-        append(UInt8((le >> 0)  & 0xFF))
-        append(UInt8((le >> 8)  & 0xFF))
+        append(UInt8((le >> 0) & 0xFF))
+        append(UInt8((le >> 8) & 0xFF))
         append(UInt8((le >> 16) & 0xFF))
         append(UInt8((le >> 24) & 0xFF))
     }
