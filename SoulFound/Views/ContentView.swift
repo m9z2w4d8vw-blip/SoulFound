@@ -19,5 +19,8 @@ struct ContentView: View {
         .environmentObject(client)
         .environmentObject(searchManager)
         .environmentObject(downloadManager)
+        .onAppear {
+            searchManager.attach(to: client)
+        }
     }
 }
