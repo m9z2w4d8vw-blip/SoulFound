@@ -159,39 +159,10 @@ class SoulseekClient: ObservableObject {
     }
 
     private func processBuffer() {
-        while true {
-            guard receiveBuffer.count >= 4 else { break }
+        receiveBuffer.removeAll()
+    }
 
-            let msgLength = Int(receiveBuffer.readUInt32(at: 0))
-
-            // Sanity check against garbage data
-            guard msgLength >= 4, msgLength <= 1_000_000 else {
-                receiveBuffer.removeAll()
-                return
-            }
-
-            // totalNeeded = 4 (length field) + msgLength
-            guard msgLength <= Int.max - 4 else { receiveBuffer.removeAll(); return }
-            let totalNeeded = 4 + msgLength
-
-            guard receiveBuffer.count >= totalNeeded else { break }
-
-            guard totalNeeded >= 8 else {
-                // Message too short to have a code — skip it
-                receiveBuffer.removeFirst(totalNeeded)
-                continue
-            }
-
-            let code = receiveBuffer.readUInt32(at: 4)
-            let bodyStart = 8
-            let bodyEnd = totalNeeded
-            let body = bodyEnd > bodyStart
-                ? receiveBuffer.subdata(in: bodyStart..<bodyEnd)
-                : Data()
-
-            receiveBuffer.removeFirst(totalNeeded)
-            handleMessage(code: code, body: body)
-        }
+        receiveBuffer = buf
     }
 
     private func handleMessage(code: UInt32, body: Data) {
