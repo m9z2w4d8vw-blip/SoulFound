@@ -159,15 +159,42 @@ class SoulseekClient: ObservableObject {
     }
 
     private func processBuffer() {
-        while receiveBuffer.count >= 8 {
-            let msgLength = Int(receiveBuffer.readUInt32(at: 0))
+        // Work on a local copy to avoid any mutation issues
+        var buf = receiveBuffer
+
+        while buf.count >= 4 {
+            let b0 = UInt32(buf[buf.startIndex])
+            let b1 = UInt32(buf[buf.startIndex + 1])
+            let b2 = UInt32(buf[buf.startIndex + 2])
+            let b3 = UInt32(buf[buf.startIndex + 3])
+            let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+
+            guard msgLength >= 4, msgLength <= 2_000_000 else {
+                receiveBuffer.removeAll()
+                return
+            }
+
             let totalNeeded = 4 + msgLength
-            guard receiveBuffer.count >= totalNeeded else { break }
-            let code = receiveBuffer.readUInt32(at: 4)
-            let body = receiveBuffer.subdata(in: 8..<totalNeeded)
-            receiveBuffer.removeFirst(totalNeeded)
-            handleMessage(code: code, body: body)
+            guard buf.count >= totalNeeded else { break }
+
+            if buf.count >= 8 {
+                let c0 = UInt32(buf[buf.startIndex + 4])
+                let c1 = UInt32(buf[buf.startIndex + 5])
+                let c2 = UInt32(buf[buf.startIndex + 6])
+                let c3 = UInt32(buf[buf.startIndex + 7])
+                let code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+
+                let bodyRange = (buf.startIndex + 8)..<(buf.startIndex + totalNeeded)
+                let body = totalNeeded > 8 ? Data(buf[bodyRange]) : Data()
+
+                buf.removeFirst(totalNeeded)
+                handleMessage(code: code, body: body)
+            } else {
+                buf.removeFirst(totalNeeded)
+            }
         }
+
+        receiveBuffer = buf
     }
 
     private func handleMessage(code: UInt32, body: Data) {
