@@ -45,7 +45,6 @@ class SoulseekClient: ObservableObject {
         let conn = NWConnection(host: host, port: port, using: .tcp)
         self.connection = conn
 
-        // Wait for TCP connection to become ready
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             conn.stateUpdateHandler = { state in
                 switch state {
@@ -64,7 +63,6 @@ class SoulseekClient: ObservableObject {
 
         startReceiving()
 
-        // Send Login and wait for server response
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.loginContinuation = cont
             do {
@@ -109,17 +107,14 @@ class SoulseekClient: ObservableObject {
     // MARK: - Post-login messages
 
     private func sendPostLoginMessages() {
-        // SetListenPort (2) — port 0, no uploads
         var portBody = Data()
         portBody.appendUInt32(0)
         send(buildMessage(code: 2, body: portBody))
 
-        // SetStatus (28) — 1 = online
         var statusBody = Data()
         statusBody.appendUInt32(1)
         send(buildMessage(code: 28, body: statusBody))
 
-        // SharedFoldersFiles (35) — 0 dirs, 0 files
         var shareBody = Data()
         shareBody.appendUInt32(0)
         shareBody.appendUInt32(0)
@@ -144,7 +139,6 @@ class SoulseekClient: ObservableObject {
 
     private func startReceiving() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            // Hop back to MainActor so we can safely touch @MainActor state
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let data {
@@ -158,11 +152,9 @@ class SoulseekClient: ObservableObject {
         }
     }
 
+    // Discard all incoming data for now — prevents post-login crash
     private func processBuffer() {
         receiveBuffer.removeAll()
-    }
-
-        receiveBuffer = buf
     }
 
     private func handleMessage(code: UInt32, body: Data) {
