@@ -47,8 +47,7 @@ class SoulseekClient: ObservableObject {
 
         // Wait for TCP connection to become ready
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            conn.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
+            conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
                     cont.resume()
@@ -93,7 +92,6 @@ class SoulseekClient: ObservableObject {
     // MARK: - Login message (Server code 1)
 
     private func sendLogin(username: String, password: String) throws {
-        // MD5 of username+password as required by Soulseek protocol
         let md5Input = (username + password).data(using: .utf8)!
         let hash = Insecure.MD5.hash(data: md5Input)
         let md5String = hash.map { String(format: "%02x", $0) }.joined()
@@ -146,14 +144,17 @@ class SoulseekClient: ObservableObject {
 
     private func startReceiving() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            if let data {
-                self.receiveBuffer.append(data)
-                self.processBuffer()
+            // Hop back to MainActor so we can safely touch @MainActor state
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let data {
+                    self.receiveBuffer.append(data)
+                    self.processBuffer()
+                }
+                if error != nil { return }
+                if isComplete { self.disconnect(); return }
+                self.startReceiving()
             }
-            if error != nil { return }
-            if isComplete { self.disconnect(); return }
-            self.startReceiving()
         }
     }
 
@@ -200,8 +201,11 @@ class SoulseekClient: ObservableObject {
 
 private extension Data {
     mutating func appendUInt32(_ value: UInt32) {
-        var le = value.littleEndian
-        append(contentsOf: withUnsafeBytes(of: &le, Array.init))
+        let le = value.littleEndian
+        append(UInt8((le >> 0)  & 0xFF))
+        append(UInt8((le >> 8)  & 0xFF))
+        append(UInt8((le >> 16) & 0xFF))
+        append(UInt8((le >> 24) & 0xFF))
     }
 
     mutating func appendSlskString(_ string: String) {
