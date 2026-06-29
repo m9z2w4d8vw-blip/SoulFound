@@ -133,7 +133,7 @@ struct LoginSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
     ToolbarItem(placement: .topBarTrailing) {
-        ShareLink(item: DebugLog.shared.fileURL) {
+        ShareLink(item: DebugLog.shared.fileURLPublic) {
             Image(systemName: "doc.text")
         }
     }
