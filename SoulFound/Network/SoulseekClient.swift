@@ -201,8 +201,11 @@ class SoulseekClient: ObservableObject {
 
 private extension Data {
     mutating func appendUInt32(_ value: UInt32) {
-        var le = value.littleEndian
-        Swift.withUnsafeBytes(of: &le) { self.append(contentsOf: $0) }
+        let le = value.littleEndian
+        append(UInt8((le >> 0)  & 0xFF))
+        append(UInt8((le >> 8)  & 0xFF))
+        append(UInt8((le >> 16) & 0xFF))
+        append(UInt8((le >> 24) & 0xFF))
     }
 
     mutating func appendSlskString(_ string: String) {
