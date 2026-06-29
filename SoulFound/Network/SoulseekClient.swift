@@ -50,7 +50,9 @@ class SoulseekClient: ObservableObject {
     // MARK: - Public API
 
     func connect(username: String, password: String) async throws {
-        disconnect()
+    DebugLog.shared.log("BUILD v0.3.8 - IP fix active")
+    disconnect()
+    // ...rest of function
 
         let host = NWEndpoint.Host(Server.host)
         let port = NWEndpoint.Port(rawValue: Server.port)!
@@ -264,26 +266,27 @@ class SoulseekClient: ObservableObject {
     /// search results or request a file) but couldn't reach us directly. We respond by
     /// dialing out to them ourselves and sending PierceFireWall with the matching token.
     private func handleConnectToPeer(body: Data) {
-        var offset = 0
-        guard let peerUsername = body.readSlskString(at: &offset) else { return }
-        guard let type = body.readSlskString(at: &offset) else { return }
-        guard offset + 4 <= body.count else { return }
-        guard offset + 4 <= body.count else { return }
-let ip = body.readUInt32(at: offset); offset += 4 // v0.3.4 IP fix
-        guard offset + 4 <= body.count else { return }
-        let port = body.readUInt32(at: offset); offset += 4
-        guard offset + 4 <= body.count else { return }
-        let token = body.readUInt32(at: offset); offset += 4
+    var offset = 0
+    guard let peerUsername = body.readSlskString(at: &offset) else { return }
+    guard let type = body.readSlskString(at: &offset) else { return }
+    guard offset + 4 <= body.count else { return }
+    let ip = body.readUInt32(at: offset); offset += 4
+    let ipStr = "\(ip & 0xFF).\((ip >> 8) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 24) & 0xFF)"
+    DebugLog.shared.log("Raw IP uint32:\(ip) → \(ipStr) for \(peerUsername)")
+    guard offset + 4 <= body.count else { return }
+    let port = body.readUInt32(at: offset); offset += 4
+    guard offset + 4 <= body.count else { return }
+    let token = body.readUInt32(at: offset); offset += 4
 
-        // "P" = peer connection (search results, etc), "F" = file transfer.
-        // "D" (distributed network) is out of scope for a download-only client.
-        guard type == "P" || type == "F" else { return }
+    // "P" = peer connection (search results, etc), "F" = file transfer.
+    // "D" (distributed network) is out of scope for a download-only client.
+    guard type == "P" || type == "F" else { return }
 
-        peerManager.connectOut(
-            toIP: ip,
-            port: UInt16(truncatingIfNeeded: port),
-            token: token,
-            peerUsername: peerUsername
-        )
-    }
+    peerManager.connectOut(
+        toIP: ip,
+        port: UInt16(truncatingIfNeeded: port),
+        token: token,
+        peerUsername: peerUsername
+    )
+}
 }
