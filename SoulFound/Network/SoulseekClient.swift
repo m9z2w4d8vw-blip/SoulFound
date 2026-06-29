@@ -31,9 +31,21 @@ class SoulseekClient: ObservableObject {
     @Published var isConnected = false
     @Published var username: String = ""
 
+    /// Search results received so far, keyed by the token returned from `search(query:)`.
+    /// SearchManager observes this and filters by its own current token.
+    @Published var searchResultsByToken: [UInt32: [SearchResult]] = [:]
+
     private var connection: NWConnection?
     private var receiveBuffer = Data()
     private var loginContinuation: CheckedContinuation<Void, Error>?
+
+    let peerManager = PeerConnectionManager()
+
+    init() {
+        peerManager.onSearchResults = { [weak self] results, token in
+            self?.searchResultsByToken[token, default: []].append(contentsOf: results)
+        }
+    }
 
     // MARK: - Public API
 
@@ -75,6 +87,8 @@ class SoulseekClient: ObservableObject {
 
         self.username = username
         self.isConnected = true
+
+        peerManager.startListening()
         sendPostLoginMessages()
     }
 
@@ -85,6 +99,16 @@ class SoulseekClient: ObservableObject {
         username = ""
         receiveBuffer = Data()
         loginContinuation = nil
+    }
+
+    /// Sends a global file search. Returns the token to watch in `searchResultsByToken`.
+    func search(query: String) -> UInt32 {
+        let token = UInt32.random(in: 1...(UInt32.max - 1))
+        var body = Data()
+        body.appendUInt32(token)
+        body.appendSlskString(query)
+        send(buildMessage(code: 26, body: body)) // FileSearch
+        return token
     }
 
     // MARK: - Login message (Server code 1)
@@ -107,8 +131,14 @@ class SoulseekClient: ObservableObject {
     // MARK: - Post-login messages
 
     private func sendPostLoginMessages() {
+        // SetWaitPort — tell the server which port we're listening on for incoming
+        // peer connections. Note: on a phone with no port forwarding, this port
+        // usually isn't reachable from the internet. Peers who can't reach it directly
+        // will trigger a ConnectToPeer (code 18) message instead, which we handle below
+        // by dialing out ourselves — that's the path that actually works without
+        // port forwarding.
         var portBody = Data()
-        portBody.appendUInt32(0)
+        portBody.appendUInt32(UInt32(peerManager.listenPort))
         send(buildMessage(code: 2, body: portBody))
 
         var statusBody = Data()
@@ -152,55 +182,40 @@ class SoulseekClient: ObservableObject {
         }
     }
 
-    // Discard all incoming data for now — prevents post-login crash
+    /// Parses every complete message in the buffer and dispatches it via handleMessage.
+    /// Every slice is bounds-checked before use — no operation here should ever be able
+    /// to trap, even on a fully desynced/garbage stream (worst case: we clear the buffer
+    /// and wait for the connection to resync naturally on the next message boundary).
     private func processBuffer() {
-        // If login is still pending, try to parse just the login response
-        // Otherwise discard everything (post-login flood)
-        guard loginContinuation != nil else {
-            receiveBuffer.removeAll()
-            return
+        while receiveBuffer.count >= 4 {
+            let msgLength = Int(receiveBuffer.readUInt32(at: 0))
+
+            // Every real Soulseek message has at least a 4-byte code, so anything
+            // below that (or absurdly large) means we've lost sync with the stream.
+            guard msgLength >= 4, msgLength <= 50_000_000 else {
+                receiveBuffer.removeAll()
+                return
+            }
+
+            let totalNeeded = 4 + msgLength
+            guard receiveBuffer.count >= totalNeeded else { break }
+
+            let code = receiveBuffer.readUInt32(at: 4)
+            let body = totalNeeded > 8 ? Data(receiveBuffer[8..<totalNeeded]) : Data()
+
+            receiveBuffer.removeFirst(totalNeeded)
+            handleMessage(code: code, body: body)
         }
-
-        // Need at least 8 bytes (4 length + 4 code)
-        guard receiveBuffer.count >= 8 else { return }
-
-        let b0 = UInt32(receiveBuffer[0])
-        let b1 = UInt32(receiveBuffer[1])
-        let b2 = UInt32(receiveBuffer[2])
-        let b3 = UInt32(receiveBuffer[3])
-        let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
-
-        guard msgLength >= 4, msgLength <= 1_000_000 else {
-            receiveBuffer.removeAll()
-            return
-        }
-
-        let totalNeeded = 4 + msgLength
-        guard receiveBuffer.count >= totalNeeded else { return }
-
-        let c0 = UInt32(receiveBuffer[4])
-        let c1 = UInt32(receiveBuffer[5])
-        let c2 = UInt32(receiveBuffer[6])
-        let c3 = UInt32(receiveBuffer[7])
-        let code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
-
-        var body = Data()
-        if totalNeeded > 8 {
-            body = Data(receiveBuffer[8..<totalNeeded])
-        }
-        receiveBuffer.removeFirst(totalNeeded)
-
-        if code == 1 {
-            handleLoginResponse(body: body)
-        }
-        // Discard any remaining data
-        receiveBuffer.removeAll()
     }
 
     private func handleMessage(code: UInt32, body: Data) {
         switch code {
-        case 1: handleLoginResponse(body: body)
-        default: break
+        case 1:
+            handleLoginResponse(body: body)
+        case 18:
+            handleConnectToPeer(body: body)
+        default:
+            break
         }
     }
 
@@ -222,41 +237,32 @@ class SoulseekClient: ObservableObject {
         }
         loginContinuation = nil
     }
-}
 
-// MARK: - Data helpers
+    // MARK: - ConnectToPeer (server code 18)
 
-private extension Data {
-    mutating func appendUInt32(_ value: UInt32) {
-        let le = value.littleEndian
-        append(UInt8((le >> 0)  & 0xFF))
-        append(UInt8((le >> 8)  & 0xFF))
-        append(UInt8((le >> 16) & 0xFF))
-        append(UInt8((le >> 24) & 0xFF))
-    }
+    /// The server sends this when another user wants to connect to us (e.g. to deliver
+    /// search results or request a file) but couldn't reach us directly. We respond by
+    /// dialing out to them ourselves and sending PierceFireWall with the matching token.
+    private func handleConnectToPeer(body: Data) {
+        var offset = 0
+        guard let peerUsername = body.readSlskString(at: &offset) else { return }
+        guard let type = body.readSlskString(at: &offset) else { return }
+        guard offset + 4 <= body.count else { return }
+        let ip = body.readUInt32(at: offset); offset += 4
+        guard offset + 4 <= body.count else { return }
+        let port = body.readUInt32(at: offset); offset += 4
+        guard offset + 4 <= body.count else { return }
+        let token = body.readUInt32(at: offset); offset += 4
 
-    mutating func appendSlskString(_ string: String) {
-        let bytes = string.data(using: .utf8) ?? Data()
-        appendUInt32(UInt32(bytes.count))
-        append(bytes)
-    }
+        // "P" = peer connection (search results, etc), "F" = file transfer.
+        // "D" (distributed network) is out of scope for a download-only client.
+        guard type == "P" || type == "F" else { return }
 
-    func readUInt32(at offset: Int) -> UInt32 {
-        guard offset + 4 <= count else { return 0 }
-        let b0 = UInt32(self[offset])
-        let b1 = UInt32(self[offset + 1])
-        let b2 = UInt32(self[offset + 2])
-        let b3 = UInt32(self[offset + 3])
-        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-    }
-
-    func readSlskString(at offset: inout Int) -> String? {
-        guard offset + 4 <= count else { return nil }
-        let len = Int(readUInt32(at: offset))
-        offset += 4
-        guard offset + len <= count else { return nil }
-        let str = String(data: subdata(in: offset..<offset+len), encoding: .utf8)
-        offset += len
-        return str
+        peerManager.connectOut(
+            toIP: ip,
+            port: UInt16(truncatingIfNeeded: port),
+            token: token,
+            peerUsername: peerUsername
+        )
     }
 }
