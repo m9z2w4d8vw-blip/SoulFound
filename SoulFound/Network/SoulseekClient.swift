@@ -159,8 +159,13 @@ class SoulseekClient: ObservableObject {
     }
 
     private func processBuffer() {
-        while receiveBuffer.count >= 8 {
+        while receiveBuffer.count >= 4 {
             let msgLength = Int(receiveBuffer.readUInt32(at: 0))
+            // Sanity check — ignore obviously corrupt messages
+            guard msgLength >= 4, msgLength < 10_000_000 else {
+                receiveBuffer.removeAll()
+                return
+            }
             let totalNeeded = 4 + msgLength
             guard receiveBuffer.count >= totalNeeded else { break }
             let code = receiveBuffer.readUInt32(at: 4)
