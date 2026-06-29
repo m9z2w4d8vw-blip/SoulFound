@@ -248,11 +248,11 @@ class PeerConnectionManager {
             let result = SearchResult(
                 username: username,
                 filename: filename,
-                fileSize: Int64(fileSize),
+                size: Int64(fileSize),
                 bitrate: bitrate > 0 ? Int(bitrate) : nil,
-                duration: duration > 0 ? Int(duration) : nil
+                duration: duration > 0 ? Int(duration) : nil,
+                remotePath: filename
             )
-            results.append(result)
         }
 
         return results
@@ -261,7 +261,7 @@ class PeerConnectionManager {
 
 // MARK: - BufferBox
 // Simple reference-type wrapper so we can mutate a buffer inside async closures
-private class BufferBox {
+private class BufferBox: @unchecked Sendable {
     var data = Data()
 }
 
