@@ -7,6 +7,27 @@ import Compression
 /// When the server sends us a ConnectToPeer (code 18), we dial out to the peer,
 /// send PierceFireWall to identify ourselves, then wait for their FileSearchResult.
 @MainActor
+// MARK: - DebugLog
+class DebugLog {
+    static let shared = DebugLog()
+    private let fileURL: URL
+    private init() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        fileURL = docs.appendingPathComponent("soulfound_debug.txt")
+        try? "".write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+    func log(_ message: String) {
+        let line = "[\(Date())] \(message)\n"
+        if let data = line.data(using: .utf8),
+           let handle = try? FileHandle(forWritingTo: fileURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        }
+        print(line)
+    }
+}
+
 class PeerConnectionManager {
 
     /// Called on the main actor when results arrive. (token, results)
@@ -60,6 +81,7 @@ class PeerConnectionManager {
         }
 
         conn.start(queue: .main)
+        DebugLog.shared.log("Dialing peer \(peerUsername) at \(ipString):\(port) token:\(token)")
 
         // Time out after 15 seconds
         Task {
@@ -136,6 +158,7 @@ class PeerConnectionManager {
         switch code {
         case 9:
             // FileSearchResult
+            DebugLog.shared.log("Got search result from \(senderUsername), token:\(resultToken), results to parse")
             handleSearchResult(body: body, token: token)
             conn.cancel()
             activeConnections.removeValue(forKey: token)
@@ -190,8 +213,10 @@ class PeerConnectionManager {
             }
         }
 
-        guard result > 0 else { return nil }
-        return destination.prefix(result)
+        guard result > 0 else {
+    DebugLog.shared.log("zlib decompress failed, input size: \(data.count)")
+    return nil
+}
     }
 
     // MARK: - File list parser

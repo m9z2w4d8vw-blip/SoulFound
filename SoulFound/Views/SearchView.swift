@@ -132,10 +132,12 @@ struct LoginSheet: View {
             .navigationTitle("Log in")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
+    ToolbarItem(placement: .topBarTrailing) {
+        ShareLink(item: DebugLog.shared.fileURL) {
+            Image(systemName: "doc.text")
+        }
+    }
+}
         }
     }
 

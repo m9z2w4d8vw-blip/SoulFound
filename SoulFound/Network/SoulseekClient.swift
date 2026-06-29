@@ -227,15 +227,17 @@ class SoulseekClient: ObservableObject {
 }
 
     private func handleMessage(code: UInt32, body: Data) {
-        switch code {
-        case 1:
-            handleLoginResponse(body: body)
-        case 18:
-            handleConnectToPeer(body: body)
-        default:
-            break
-        }
+    DebugLog.shared.log("Server message code: \(code), size: \(body.count)")
+    switch code {
+    case 1:
+        handleLoginResponse(body: body)
+    case 18:
+        DebugLog.shared.log("ConnectToPeer received")
+        handleConnectToPeer(body: body)
+    default:
+        break
     }
+}
 
     // MARK: - Login response
 
