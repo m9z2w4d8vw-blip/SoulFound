@@ -35,7 +35,7 @@ class PeerConnectionManager {
     func startListening() {}
 
     func connectOut(toIP ip: UInt32, port: UInt16, token: UInt32, peerUsername: String) {
-        let ipString = "\((ip >> 24) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 8) & 0xFF).\(ip & 0xFF)"
+        let ipString = "\(ip & 0xFF).\((ip >> 8) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 24) & 0xFF)"
         guard port > 0 else { return }
         let host = NWEndpoint.Host(ipString)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
