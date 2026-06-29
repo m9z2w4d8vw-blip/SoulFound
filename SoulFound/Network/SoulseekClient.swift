@@ -154,6 +154,46 @@ class SoulseekClient: ObservableObject {
 
     // Discard all incoming data for now — prevents post-login crash
     private func processBuffer() {
+        // If login is still pending, try to parse just the login response
+        // Otherwise discard everything (post-login flood)
+        guard loginContinuation != nil else {
+            receiveBuffer.removeAll()
+            return
+        }
+
+        // Need at least 8 bytes (4 length + 4 code)
+        guard receiveBuffer.count >= 8 else { return }
+
+        let b0 = UInt32(receiveBuffer[0])
+        let b1 = UInt32(receiveBuffer[1])
+        let b2 = UInt32(receiveBuffer[2])
+        let b3 = UInt32(receiveBuffer[3])
+        let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+
+        guard msgLength >= 4, msgLength <= 1_000_000 else {
+            receiveBuffer.removeAll()
+            return
+        }
+
+        let totalNeeded = 4 + msgLength
+        guard receiveBuffer.count >= totalNeeded else { return }
+
+        let c0 = UInt32(receiveBuffer[4])
+        let c1 = UInt32(receiveBuffer[5])
+        let c2 = UInt32(receiveBuffer[6])
+        let c3 = UInt32(receiveBuffer[7])
+        let code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+
+        var body = Data()
+        if totalNeeded > 8 {
+            body = Data(receiveBuffer[8..<totalNeeded])
+        }
+        receiveBuffer.removeFirst(totalNeeded)
+
+        if code == 1 {
+            handleLoginResponse(body: body)
+        }
+        // Discard any remaining data
         receiveBuffer.removeAll()
     }
 
