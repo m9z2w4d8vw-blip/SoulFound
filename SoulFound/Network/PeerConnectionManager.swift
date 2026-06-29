@@ -76,11 +76,8 @@ class PeerConnectionManager {
 
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
     var msg = Data()
-    msg.append(1)                          // single byte: message type 1 = PeerInit
-    msg.appendSlskString("musicListener")  // your username
-    msg.appendSlskString("P")             // connection type
-    msg.appendUInt32(token)
-
+    msg.append(0)              // code 0 = PierceFireWall
+    msg.appendUInt32(token)    // the token from ConnectToPeer
     conn.send(content: msg, completion: .idempotent)
 }
 
