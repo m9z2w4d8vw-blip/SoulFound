@@ -75,15 +75,11 @@ class PeerConnectionManager {
     }
 
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
-    var body = Data()
-    body.appendSlskString("musicListener")
-    body.appendSlskString("P")
-    body.appendUInt32(token)
-
     var msg = Data()
-    msg.appendUInt32(UInt32(4 + body.count)) // 4 bytes for code + body
-    msg.appendUInt32(1)                      // peer init code as UInt32
-    msg.append(body)
+    msg.append(1)                          // single byte: message type 1 = PeerInit
+    msg.appendSlskString("musicListener")  // your username
+    msg.appendSlskString("P")             // connection type
+    msg.appendUInt32(token)
 
     conn.send(content: msg, completion: .idempotent)
 }
@@ -150,15 +146,15 @@ class PeerConnectionManager {
     }
 
     private func handlePeerMessage(code: UInt32, body: Data, token: UInt32, conn: NWConnection) {
-        switch code {
-        case 9:
-            handleSearchResult(body: body, token: token)
-            conn.cancel()
-            activeConnections.removeValue(forKey: token)
-        default:
-            DebugLog.shared.log("Peer unknown code:\(code) token:\(token)")
-        }
+    switch code {
+    case 9:
+        handleSearchResult(body: body, token: token)
+        conn.cancel()
+        activeConnections.removeValue(forKey: token)
+    default:
+        DebugLog.shared.log("Peer UNHANDLED code:\(code) size:\(body.count) token:\(token)")
     }
+}
 
     private func handleSearchResult(body: Data, token: UInt32) {
         var offset = 0
