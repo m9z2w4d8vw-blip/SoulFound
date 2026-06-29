@@ -269,7 +269,7 @@ class SoulseekClient: ObservableObject {
         guard let type = body.readSlskString(at: &offset) else { return }
         guard offset + 4 <= body.count else { return }
         guard offset + 4 <= body.count else { return }
-let ip = body.readUInt32(at: offset); offset += 4
+let ip = body.readUInt32(at: offset); offset += 4 // v0.3.4 IP fix
         guard offset + 4 <= body.count else { return }
         let port = body.readUInt32(at: offset); offset += 4
         guard offset + 4 <= body.count else { return }
