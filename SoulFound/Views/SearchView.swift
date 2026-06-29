@@ -55,6 +55,13 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("SoulFound")
+.toolbar {
+    ToolbarItem(placement: .topBarTrailing) {
+        ShareLink(item: DebugLog.shared.fileURLPublic) {
+            Image(systemName: "doc.text")
+        }
+    }
+}
             .sheet(isPresented: $showLogin) {
                 LoginSheet()
             }
