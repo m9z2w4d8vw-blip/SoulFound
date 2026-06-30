@@ -147,12 +147,6 @@ struct LoginSheet: View {
                     }
                 }
             }
-            .onAppear {
-                if let saved = KeychainHelper.loadSavedCredentials() {
-                    username = saved.username
-                    password = saved.password
-                }
-            }
         }
     }
 
@@ -161,7 +155,6 @@ struct LoginSheet: View {
         errorMessage = nil
         do {
             try await client.connect(username: username, password: password)
-            KeychainHelper.save(username: username, password: password)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
