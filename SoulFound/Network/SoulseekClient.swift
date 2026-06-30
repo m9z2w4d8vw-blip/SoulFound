@@ -44,15 +44,15 @@ class SoulseekClient: ObservableObject {
     init() {
         peerManager.onSearchResults = { [weak self] results, token in
             self?.searchResultsByToken[token, default: []].append(contentsOf: results)
+            DebugLog.shared.log("Stored \(results.count) results under token:\(token), total now:\(self?.searchResultsByToken[token]?.count ?? 0)")
         }
     }
 
     // MARK: - Public API
 
     func connect(username: String, password: String) async throws {
-    DebugLog.shared.log("BUILD v0.4.6 - length-prefixed PierceFireWall")
-    disconnect()
-    // ...rest of function
+        DebugLog.shared.log("BUILD v0.5.2 - per-search result isolation")
+        disconnect()
 
         let host = NWEndpoint.Host(Server.host)
         let port = NWEndpoint.Port(rawValue: Server.port)!
@@ -104,13 +104,24 @@ class SoulseekClient: ObservableObject {
     }
 
     /// Sends a global file search. Returns the token to watch in `searchResultsByToken`.
+    /// Clears any previous entry under this token (defensive — tokens are random so
+    /// collisions are astronomically unlikely, but this guarantees a clean slate).
     func search(query: String) -> UInt32 {
         let token = UInt32.random(in: 1...(UInt32.max - 1))
+        searchResultsByToken[token] = []
+
         var body = Data()
         body.appendUInt32(token)
         body.appendSlskString(query)
         send(buildMessage(code: 26, body: body)) // FileSearch
+        DebugLog.shared.log("Sent FileSearch query:\"\(query)\" token:\(token)")
         return token
+    }
+
+    /// Clears stored results for a token. Call this when a search's UI lifecycle ends
+    /// so old entries don't pile up in memory across many searches in one session.
+    func clearSearchResults(for token: UInt32) {
+        searchResultsByToken.removeValue(forKey: token)
     }
 
     // MARK: - Login message (Server code 1)
@@ -189,57 +200,57 @@ class SoulseekClient: ObservableObject {
     /// to trap, even on a fully desynced/garbage stream (worst case: we clear the buffer
     /// and wait for the connection to resync naturally on the next message boundary).
     private func processBuffer() {
-    // Make contiguous to avoid subscript traps on sliced Data
-    var buf = Data(receiveBuffer)
-    receiveBuffer = Data()
+        // Make contiguous to avoid subscript traps on sliced Data
+        var buf = Data(receiveBuffer)
+        receiveBuffer = Data()
 
-    while buf.count >= 4 {
-        let b0 = UInt32(buf[0])
-        let b1 = UInt32(buf[1])
-        let b2 = UInt32(buf[2])
-        let b3 = UInt32(buf[3])
-        let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+        while buf.count >= 4 {
+            let b0 = UInt32(buf[0])
+            let b1 = UInt32(buf[1])
+            let b2 = UInt32(buf[2])
+            let b3 = UInt32(buf[3])
+            let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
 
-        guard msgLength >= 4, msgLength <= 50_000_000 else {
-            return
-        }
+            guard msgLength >= 4, msgLength <= 50_000_000 else {
+                return
+            }
 
-        let totalNeeded = 4 + msgLength
-        guard buf.count >= totalNeeded else {
-            receiveBuffer = buf  // save remainder
-            return
-        }
+            let totalNeeded = 4 + msgLength
+            guard buf.count >= totalNeeded else {
+                receiveBuffer = buf  // save remainder
+                return
+            }
 
-        let code: UInt32
-        if buf.count >= 8 {
-            let c0 = UInt32(buf[4])
-            let c1 = UInt32(buf[5])
-            let c2 = UInt32(buf[6])
-            let c3 = UInt32(buf[7])
-            code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
-        } else {
+            let code: UInt32
+            if buf.count >= 8 {
+                let c0 = UInt32(buf[4])
+                let c1 = UInt32(buf[5])
+                let c2 = UInt32(buf[6])
+                let c3 = UInt32(buf[7])
+                code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+            } else {
+                buf = Data(buf.dropFirst(totalNeeded))
+                continue
+            }
+
+            let body = totalNeeded > 8 ? Data(buf[8..<totalNeeded]) : Data()
             buf = Data(buf.dropFirst(totalNeeded))
-            continue
+            handleMessage(code: code, body: body)
         }
-
-        let body = totalNeeded > 8 ? Data(buf[8..<totalNeeded]) : Data()
-        buf = Data(buf.dropFirst(totalNeeded))
-        handleMessage(code: code, body: body)
     }
-}
 
     private func handleMessage(code: UInt32, body: Data) {
-    DebugLog.shared.log("Server message code: \(code), size: \(body.count)")
-    switch code {
-    case 1:
-        handleLoginResponse(body: body)
-    case 18:
-        DebugLog.shared.log("ConnectToPeer received")
-        handleConnectToPeer(body: body)
-    default:
-        break
+        DebugLog.shared.log("Server message code: \(code), size: \(body.count)")
+        switch code {
+        case 1:
+            handleLoginResponse(body: body)
+        case 18:
+            DebugLog.shared.log("ConnectToPeer received")
+            handleConnectToPeer(body: body)
+        default:
+            break
+        }
     }
-}
 
     // MARK: - Login response
 
@@ -266,27 +277,27 @@ class SoulseekClient: ObservableObject {
     /// search results or request a file) but couldn't reach us directly. We respond by
     /// dialing out to them ourselves and sending PierceFireWall with the matching token.
     private func handleConnectToPeer(body: Data) {
-    var offset = 0
-    guard let peerUsername = body.readSlskString(at: &offset) else { return }
-    guard let type = body.readSlskString(at: &offset) else { return }
-    guard offset + 4 <= body.count else { return }
-    let ip = body.readUInt32(at: offset); offset += 4
-    let ipStr = "\(ip & 0xFF).\((ip >> 8) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 24) & 0xFF)"
-    DebugLog.shared.log("Raw IP uint32:\(ip) → \(ipStr) for \(peerUsername)")
-    guard offset + 4 <= body.count else { return }
-    let port = body.readUInt32(at: offset); offset += 4
-    guard offset + 4 <= body.count else { return }
-    let token = body.readUInt32(at: offset); offset += 4
+        var offset = 0
+        guard let peerUsername = body.readSlskString(at: &offset) else { return }
+        guard let type = body.readSlskString(at: &offset) else { return }
+        guard offset + 4 <= body.count else { return }
+        let ip = body.readUInt32(at: offset); offset += 4
+        let ipStr = "\(ip & 0xFF).\((ip >> 8) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 24) & 0xFF)"
+        DebugLog.shared.log("Raw IP uint32:\(ip) → \(ipStr) for \(peerUsername)")
+        guard offset + 4 <= body.count else { return }
+        let port = body.readUInt32(at: offset); offset += 4
+        guard offset + 4 <= body.count else { return }
+        let token = body.readUInt32(at: offset); offset += 4
 
-    // "P" = peer connection (search results, etc), "F" = file transfer.
-    // "D" (distributed network) is out of scope for a download-only client.
-    guard type == "P" || type == "F" else { return }
+        // "P" = peer connection (search results, etc), "F" = file transfer.
+        // "D" (distributed network) is out of scope for a download-only client.
+        guard type == "P" || type == "F" else { return }
 
-    peerManager.connectOut(
-        toIP: ip,
-        port: UInt16(truncatingIfNeeded: port),
-        token: token,
-        peerUsername: peerUsername
-    )
-}
+        peerManager.connectOut(
+            toIP: ip,
+            port: UInt16(truncatingIfNeeded: port),
+            token: token,
+            peerUsername: peerUsername
+        )
+    }
 }
