@@ -181,7 +181,7 @@ class PeerConnectionManager {
         DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
 
         guard !results.isEmpty else { return }
-        onSearchResults?(results, token)
+onSearchResults?(results, resultToken)
     }
 
     private func zlibDecompress(_ data: Data) -> Data? {
