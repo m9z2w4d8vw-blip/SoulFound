@@ -75,16 +75,16 @@ class PeerConnectionManager {
     }
 
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
-    var body = Data()
-    body.append(0)              // code 0 = PierceFireWall
-    body.appendUInt32(token)
+        var body = Data()
+        body.append(0)              // code 0 = PierceFireWall
+        body.appendUInt32(token)
 
-    var msg = Data()
-    msg.appendUInt32(UInt32(body.count))  // length prefix
-    msg.append(body)
+        var msg = Data()
+        msg.appendUInt32(UInt32(body.count))  // length prefix
+        msg.append(body)
 
-    conn.send(content: msg, completion: .idempotent)
-}
+        conn.send(content: msg, completion: .idempotent)
+    }
 
     private func receivePeer(conn: NWConnection, token: UInt32) {
         let box = BufferBox()
@@ -148,39 +148,41 @@ class PeerConnectionManager {
     }
 
     private func handlePeerMessage(code: UInt32, body: Data, token: UInt32, conn: NWConnection) {
-    switch code {
-    case 9:
-        handleSearchResult(body: body, token: token)
-        conn.cancel()
-        activeConnections.removeValue(forKey: token)
-    default:
-        DebugLog.shared.log("Peer UNHANDLED code:\(code) size:\(body.count) token:\(token)")
+        switch code {
+        case 9:
+            handleSearchResult(body: body, token: token)
+            conn.cancel()
+            activeConnections.removeValue(forKey: token)
+        default:
+            DebugLog.shared.log("Peer UNHANDLED code:\(code) size:\(body.count) token:\(token)")
+        }
     }
-}
 
     private func handleSearchResult(body: Data, token: UInt32) {
-    guard let decompressed = zlibDecompress(body) else {
-        DebugLog.shared.log("handleSearchResult: zlib decompress of full body failed, token:\(token)")
-        return
+        guard let decompressed = zlibDecompress(body) else {
+            DebugLog.shared.log("handleSearchResult: zlib decompress of full body failed, token:\(token)")
+            return
+        }
+
+        let preview = decompressed.prefix(30).map { String(format: "%02x", $0) }.joined(separator: " ")
+        DebugLog.shared.log("Decompressed preview (token \(token)) size:\(decompressed.count): \(preview)")
+
+        var offset = 0
+        guard let senderUsername = decompressed.readSlskString(at: &offset) else {
+            DebugLog.shared.log("handleSearchResult: failed to read username after decompress")
+            return
+        }
+        guard offset + 4 <= decompressed.count else { return }
+        let resultToken = decompressed.readUInt32(at: offset); offset += 4
+
+        DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
+
+        let results = parseFileList(data: decompressed, username: senderUsername, startOffset: offset)
+        DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
+
+        guard !results.isEmpty else { return }
+        onSearchResults?(results, token)
     }
-    DebugLog.shared.log("Decompressed size: \(decompressed.count) for token:\(token)")
-
-    var offset = 0
-    guard let senderUsername = decompressed.readSlskString(at: &offset) else {
-        DebugLog.shared.log("handleSearchResult: failed to read username after decompress")
-        return
-    }
-    guard offset + 4 <= decompressed.count else { return }
-    let resultToken = decompressed.readUInt32(at: offset); offset += 4
-
-    DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
-
-    let results = parseFileList(data: decompressed, username: senderUsername, startOffset: offset)
-    DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
-
-    guard !results.isEmpty else { return }
-    onSearchResults?(results, token)
-}
 
     private func zlibDecompress(_ data: Data) -> Data? {
         let destinationSize = 10_000_000
@@ -204,12 +206,12 @@ class PeerConnectionManager {
     }
 
     private func parseFileList(data: Data, username: String, startOffset: Int) -> [SearchResult] {
-    var offset = startOffset
-    var results: [SearchResult] = []
+        var offset = startOffset
+        var results: [SearchResult] = []
 
-    guard offset + 4 <= data.count else { return results }
-    let fileCount = Int(data.readUInt32(at: offset)); offset += 4
-    guard fileCount > 0, fileCount < 10_000 else { return results }
+        guard offset + 4 <= data.count else { return results }
+        let fileCount = Int(data.readUInt32(at: offset)); offset += 4
+        guard fileCount > 0, fileCount < 10_000 else { return results }
 
         for _ in 0..<fileCount {
             guard offset < data.count else { break }
