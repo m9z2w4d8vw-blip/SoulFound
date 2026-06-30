@@ -75,9 +75,14 @@ class PeerConnectionManager {
     }
 
     private func sendPierceFireWall(conn: NWConnection, token: UInt32) {
+    var body = Data()
+    body.append(0)              // code 0 = PierceFireWall
+    body.appendUInt32(token)
+
     var msg = Data()
-    msg.append(0)              // code 0 = PierceFireWall
-    msg.appendUInt32(token)    // the token from ConnectToPeer
+    msg.appendUInt32(UInt32(body.count))  // length prefix
+    msg.append(body)
+
     conn.send(content: msg, completion: .idempotent)
 }
 

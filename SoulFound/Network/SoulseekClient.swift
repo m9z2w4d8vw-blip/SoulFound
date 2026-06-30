@@ -50,7 +50,7 @@ class SoulseekClient: ObservableObject {
     // MARK: - Public API
 
     func connect(username: String, password: String) async throws {
-    DebugLog.shared.log("BUILD v0.3.8 - IP fix active")
+    DebugLog.shared.log("BUILD v0.4.6 - length-prefixed PierceFireWall")
     disconnect()
     // ...rest of function
 
