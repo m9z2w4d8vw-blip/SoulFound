@@ -185,25 +185,30 @@ class PeerConnectionManager {
     }
 
     private func zlibDecompress(_ data: Data) -> Data? {
-        let destinationSize = 10_000_000
-        var destination = Data(count: destinationSize)
-        let result = data.withUnsafeBytes { srcPtr -> Int in
-            guard let src = srcPtr.baseAddress else { return 0 }
-            return destination.withUnsafeMutableBytes { dstPtr -> Int in
-                guard let dst = dstPtr.baseAddress else { return 0 }
-                return compression_decode_buffer(
-                    dst.assumingMemoryBound(to: UInt8.self), destinationSize,
-                    src.assumingMemoryBound(to: UInt8.self), data.count,
-                    nil, COMPRESSION_ZLIB
-                )
-            }
+    guard data.count > 6 else { return nil }
+    // Strip 2-byte zlib header and 4-byte Adler32 checksum trailer,
+    // decompress as raw deflate stream instead
+    let raw = data.subdata(in: 2..<(data.count - 4))
+
+    let destinationSize = 10_000_000
+    var destination = Data(count: destinationSize)
+    let result = raw.withUnsafeBytes { srcPtr -> Int in
+        guard let src = srcPtr.baseAddress else { return 0 }
+        return destination.withUnsafeMutableBytes { dstPtr -> Int in
+            guard let dst = dstPtr.baseAddress else { return 0 }
+            return compression_decode_buffer(
+                dst.assumingMemoryBound(to: UInt8.self), destinationSize,
+                src.assumingMemoryBound(to: UInt8.self), raw.count,
+                nil, COMPRESSION_ZLIB
+            )
         }
-        guard result > 0 else {
-            DebugLog.shared.log("zlib decompress failed, input size: \(data.count)")
-            return nil
-        }
-        return destination.prefix(result)
     }
+    guard result > 0 else {
+        DebugLog.shared.log("zlib decompress failed, input size: \(data.count)")
+        return nil
+    }
+    return destination.prefix(result)
+}
 
     private func parseFileList(data: Data, username: String, startOffset: Int) -> [SearchResult] {
         var offset = startOffset
