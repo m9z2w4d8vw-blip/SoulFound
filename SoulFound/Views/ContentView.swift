@@ -21,6 +21,11 @@ struct ContentView: View {
         .environmentObject(downloadManager)
         .onAppear {
             searchManager.attach(to: client)
+            if let saved = KeychainHelper.loadSavedCredentials() {
+                Task {
+                    try? await client.connect(username: saved.username, password: saved.password)
+                }
+            }
         }
     }
 }

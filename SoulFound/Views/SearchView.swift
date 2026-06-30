@@ -55,13 +55,13 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("SoulFound")
-.toolbar {
-    ToolbarItem(placement: .topBarTrailing) {
-        ShareLink(item: DebugLog.shared.fileURLPublic) {
-            Image(systemName: "doc.text")
-        }
-    }
-}
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: DebugLog.shared.fileURLPublic) {
+                        Image(systemName: "doc.text")
+                    }
+                }
+            }
             .sheet(isPresented: $showLogin) {
                 LoginSheet()
             }
@@ -122,7 +122,9 @@ struct LoginSheet: View {
                     TextField("Username", text: $username)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                        .textContentType(.username)
                     SecureField("Password", text: $password)
+                        .textContentType(.password)
                 }
                 if let error = errorMessage {
                     Section {
@@ -139,12 +141,18 @@ struct LoginSheet: View {
             .navigationTitle("Log in")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-    ToolbarItem(placement: .topBarTrailing) {
-        ShareLink(item: DebugLog.shared.fileURLPublic) {
-            Image(systemName: "doc.text")
-        }
-    }
-}
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: DebugLog.shared.fileURLPublic) {
+                        Image(systemName: "doc.text")
+                    }
+                }
+            }
+            .onAppear {
+                if let saved = KeychainHelper.loadSavedCredentials() {
+                    username = saved.username
+                    password = saved.password
+                }
+            }
         }
     }
 
@@ -153,6 +161,7 @@ struct LoginSheet: View {
         errorMessage = nil
         do {
             try await client.connect(username: username, password: password)
+            KeychainHelper.save(username: username, password: password)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
