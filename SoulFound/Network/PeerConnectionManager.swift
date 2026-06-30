@@ -159,32 +159,35 @@ class PeerConnectionManager {
 }
 
     private func handleSearchResult(body: Data, token: UInt32) {
-        var offset = 0
-        guard let senderUsername = body.readSlskString(at: &offset) else {
-            DebugLog.shared.log("handleSearchResult: failed to read username")
-            return
-        }
-        guard offset + 4 <= body.count else { return }
-        let resultToken = body.readUInt32(at: offset); offset += 4
+    let preview = body.prefix(20).map { String(format: "%02x", $0) }.joined(separator: " ")
+    DebugLog.shared.log("SearchResult body preview (token \(token)) size:\(body.count): \(preview)")
 
-        DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
-
-        guard offset + 6 <= body.count else {
-            DebugLog.shared.log("Body too short for zlib, count:\(body.count) offset:\(offset)")
-            return
-        }
-        let compressed = body.subdata(in: (offset + 2)..<(body.count - 4))
-        DebugLog.shared.log("Compressed size: \(compressed.count)")
-
-        guard let decompressed = zlibDecompress(compressed) else { return }
-        DebugLog.shared.log("Decompressed size: \(decompressed.count)")
-
-        let results = parseFileList(data: decompressed, username: senderUsername)
-        DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
-
-        guard !results.isEmpty else { return }
-        onSearchResults?(results, token)
+    var offset = 0
+    guard let senderUsername = body.readSlskString(at: &offset) else {
+        DebugLog.shared.log("handleSearchResult: failed to read username")
+        return
     }
+    guard offset + 4 <= body.count else { return }
+    let resultToken = body.readUInt32(at: offset); offset += 4
+
+    DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
+
+    guard offset + 6 <= body.count else {
+        DebugLog.shared.log("Body too short for zlib, count:\(body.count) offset:\(offset)")
+        return
+    }
+    let compressed = body.subdata(in: (offset + 2)..<(body.count - 4))
+    DebugLog.shared.log("Compressed size: \(compressed.count)")
+
+    guard let decompressed = zlibDecompress(compressed) else { return }
+    DebugLog.shared.log("Decompressed size: \(decompressed.count)")
+
+    let results = parseFileList(data: decompressed, username: senderUsername)
+    DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
+
+    guard !results.isEmpty else { return }
+    onSearchResults?(results, token)
+}
 
     private func zlibDecompress(_ data: Data) -> Data? {
         let destinationSize = 10_000_000
