@@ -159,30 +159,23 @@ class PeerConnectionManager {
 }
 
     private func handleSearchResult(body: Data, token: UInt32) {
-    let preview = body.prefix(20).map { String(format: "%02x", $0) }.joined(separator: " ")
-    DebugLog.shared.log("SearchResult body preview (token \(token)) size:\(body.count): \(preview)")
-
-    var offset = 0
-    guard let senderUsername = body.readSlskString(at: &offset) else {
-        DebugLog.shared.log("handleSearchResult: failed to read username")
+    guard let decompressed = zlibDecompress(body) else {
+        DebugLog.shared.log("handleSearchResult: zlib decompress of full body failed, token:\(token)")
         return
     }
-    guard offset + 4 <= body.count else { return }
-    let resultToken = body.readUInt32(at: offset); offset += 4
+    DebugLog.shared.log("Decompressed size: \(decompressed.count) for token:\(token)")
+
+    var offset = 0
+    guard let senderUsername = decompressed.readSlskString(at: &offset) else {
+        DebugLog.shared.log("handleSearchResult: failed to read username after decompress")
+        return
+    }
+    guard offset + 4 <= decompressed.count else { return }
+    let resultToken = decompressed.readUInt32(at: offset); offset += 4
 
     DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
 
-    guard offset + 6 <= body.count else {
-        DebugLog.shared.log("Body too short for zlib, count:\(body.count) offset:\(offset)")
-        return
-    }
-    let compressed = body.subdata(in: (offset + 2)..<(body.count - 4))
-    DebugLog.shared.log("Compressed size: \(compressed.count)")
-
-    guard let decompressed = zlibDecompress(compressed) else { return }
-    DebugLog.shared.log("Decompressed size: \(decompressed.count)")
-
-    let results = parseFileList(data: decompressed, username: senderUsername)
+    let results = parseFileList(data: decompressed, username: senderUsername, startOffset: offset)
     DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
 
     guard !results.isEmpty else { return }
@@ -210,13 +203,13 @@ class PeerConnectionManager {
         return destination.prefix(result)
     }
 
-    private func parseFileList(data: Data, username: String) -> [SearchResult] {
-        var offset = 0
-        var results: [SearchResult] = []
+    private func parseFileList(data: Data, username: String, startOffset: Int) -> [SearchResult] {
+    var offset = startOffset
+    var results: [SearchResult] = []
 
-        guard offset + 4 <= data.count else { return results }
-        let fileCount = Int(data.readUInt32(at: offset)); offset += 4
-        guard fileCount > 0, fileCount < 10_000 else { return results }
+    guard offset + 4 <= data.count else { return results }
+    let fileCount = Int(data.readUInt32(at: offset)); offset += 4
+    guard fileCount > 0, fileCount < 10_000 else { return results }
 
         for _ in 0..<fileCount {
             guard offset < data.count else { break }
