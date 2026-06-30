@@ -24,24 +24,22 @@ class SearchManager: ObservableObject {
     }
 
     func search(query: String) async {
-        guard let client else { return }
+    guard let client else { return }
 
-        // Cancel any in-flight search before starting a new one
-        searchTask?.cancel()
+    searchTask?.cancel()
+    isSearching = true
+    results = []
 
-        isSearching = true
-        results = []
+    let token = client.search(query: query)
+    currentToken = token
 
-        let token = client.search(query: query)
-        currentToken = token
-
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-            if !Task.isCancelled {
-                isSearching = false
-            }
+    searchTask = Task {
+        try? await Task.sleep(nanoseconds: 25_000_000_000) // 25s instead of 10s
+        if !Task.isCancelled {
+            isSearching = false
         }
-
-        await searchTask?.value
     }
+
+    await searchTask?.value
+}
 }
