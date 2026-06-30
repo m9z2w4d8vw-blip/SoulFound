@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: macos-latest
     env:
-      CACHE_BUST: "v0.4.4-fresh"
+      CACHE_BUST: "v0.4.5-fresh"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,12 +29,26 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             ONLY_ACTIVE_ARCH=NO
+      - name: Verify build output
+        run: |
+          echo "Listing build products directory:"
+          ls -la build/Build/Products/Release-iphoneos/
+          test -d build/Build/Products/Release-iphoneos/SoulFound.app || (echo "BUILD FAILED: SoulFound.app not found" && exit 1)
+          echo "App bundle contents:"
+          ls -la build/Build/Products/Release-iphoneos/SoulFound.app/
+          echo "App bundle size:"
+          du -sh build/Build/Products/Release-iphoneos/SoulFound.app
+          test -f build/Build/Products/Release-iphoneos/SoulFound.app/SoulFound || (echo "BUILD FAILED: SoulFound binary missing inside app bundle" && exit 1)
+          echo "Binary size:"
+          ls -la build/Build/Products/Release-iphoneos/SoulFound.app/SoulFound
       - name: Package IPA
         run: |
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/SoulFound.app Payload/
+          du -sh Payload/SoulFound.app
           zip -r SoulFound.ipa Payload/
-          echo "IPA built successfully"
+          echo "IPA built successfully, final size:"
+          ls -la SoulFound.ipa
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
