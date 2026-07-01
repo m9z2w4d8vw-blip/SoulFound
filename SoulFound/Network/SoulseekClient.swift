@@ -51,7 +51,7 @@ class SoulseekClient: ObservableObject {
     // MARK: - Public API
 
     func connect(username: String, password: String) async throws {
-        DebugLog.shared.log("BUILD v0.5.2 - per-search result isolation")
+        DebugLog.shared.log("BUILD v0.7.0 - resync-safe server message parser")
         disconnect()
 
         let host = NWEndpoint.Host(Server.host)
@@ -195,47 +195,84 @@ class SoulseekClient: ObservableObject {
         }
     }
 
+    /// Known-valid server message codes. Anything outside this set combined with an
+    /// implausible size is treated as a desync signal, not a real message.
+    private static let knownServerCodes: Set<UInt32> = [
+        1, 2, 3, 5, 7, 13, 14, 15, 16, 18, 22, 23, 26, 28, 32, 33, 34, 35, 36, 41,
+        42, 51, 52, 54, 56, 57, 58, 60, 62, 63, 64, 65, 66, 67, 68, 69, 71, 83, 84,
+        86, 87, 88, 90, 91, 92, 100, 102, 103, 104, 110, 111, 112, 113, 114, 115,
+        116, 117, 118, 120, 121, 122, 123, 124, 125, 126, 127, 129, 130, 133, 134,
+        135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 148, 149, 150, 151,
+        152, 153, 160, 1001
+    ]
+
     /// Parses every complete message in the buffer and dispatches it via handleMessage.
-    /// Every slice is bounds-checked before use — no operation here should ever be able
-    /// to trap, even on a fully desynced/garbage stream (worst case: we clear the buffer
-    /// and wait for the connection to resync naturally on the next message boundary).
+    ///
+    /// Every slice is bounds-checked before use. Critically, this also guards against
+    /// *stream desync*: if a length prefix looks implausible for a real Soulseek server
+    /// message (either absurdly large, or paired with a message code we don't recognize),
+    /// we don't trust it — instead of blindly waiting for however many bytes that bogus
+    /// length claims, we drop a single byte and retry parsing from the next offset. This
+    /// lets the parser self-resync onto the next real message boundary instead of getting
+    /// permanently misaligned and producing garbage codes for the rest of the connection.
     private func processBuffer() {
         // Make contiguous to avoid subscript traps on sliced Data
         var buf = Data(receiveBuffer)
         receiveBuffer = Data()
 
         while buf.count >= 4 {
-            let b0 = UInt32(buf[0])
-            let b1 = UInt32(buf[1])
-            let b2 = UInt32(buf[2])
-            let b3 = UInt32(buf[3])
+            let b0 = UInt32(buf[buf.startIndex])
+            let b1 = UInt32(buf[buf.startIndex + 1])
+            let b2 = UInt32(buf[buf.startIndex + 2])
+            let b3 = UInt32(buf[buf.startIndex + 3])
             let msgLength = Int(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
 
-            guard msgLength >= 4, msgLength <= 50_000_000 else {
-                return
+            // A real message is at minimum 4 bytes (just the code, no body).
+            // Cap sanity-checked size at 2MB — generously larger than any real
+            // Soulseek server message (RoomList, the biggest, is usually <20KB),
+            // but small enough that garbage lengths get rejected fast instead of
+            // stalling the parser waiting for data that'll never arrive as one block.
+            guard msgLength >= 4, msgLength <= 2_000_000 else {
+                DebugLog.shared.log("Desync suspected: implausible length \(msgLength), resyncing by 1 byte")
+                buf = Data(buf.dropFirst(1))
+                continue
             }
 
             let totalNeeded = 4 + msgLength
             guard buf.count >= totalNeeded else {
-                receiveBuffer = buf  // save remainder
+                receiveBuffer = buf  // save remainder, wait for more data
                 return
             }
 
-            let code: UInt32
-            if buf.count >= 8 {
-                let c0 = UInt32(buf[4])
-                let c1 = UInt32(buf[5])
-                let c2 = UInt32(buf[6])
-                let c3 = UInt32(buf[7])
-                code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
-            } else {
+            guard buf.count >= 8 else {
                 buf = Data(buf.dropFirst(totalNeeded))
                 continue
             }
 
-            let body = totalNeeded > 8 ? Data(buf[8..<totalNeeded]) : Data()
+            let c0 = UInt32(buf[buf.startIndex + 4])
+            let c1 = UInt32(buf[buf.startIndex + 5])
+            let c2 = UInt32(buf[buf.startIndex + 6])
+            let c3 = UInt32(buf[buf.startIndex + 7])
+            let code = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+
+            // Second line of defense: if the code isn't one we recognize AND the
+            // claimed size is suspiciously large, this is very likely a desynced
+            // read rather than a genuine unknown message. Resync by 1 byte instead
+            // of consuming (and thereby trusting) this framing.
+            if !Self.knownServerCodes.contains(code) && msgLength > 4096 {
+                DebugLog.shared.log("Desync suspected: unknown code \(code) with size \(msgLength), resyncing by 1 byte")
+                buf = Data(buf.dropFirst(1))
+                continue
+            }
+
+            let body = totalNeeded > 8 ? Data(buf[(buf.startIndex + 8)..<(buf.startIndex + totalNeeded)]) : Data()
             buf = Data(buf.dropFirst(totalNeeded))
             handleMessage(code: code, body: body)
+        }
+
+        // Preserve any leftover partial bytes (fewer than 4) for the next receive.
+        if !buf.isEmpty {
+            receiveBuffer = buf
         }
     }
 
