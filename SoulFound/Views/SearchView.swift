@@ -267,6 +267,7 @@ struct LoginSheet: View {
         errorMessage = nil
         do {
             try await client.connect(username: username, password: password)
+            KeychainHelper.save(username: username, password: password)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

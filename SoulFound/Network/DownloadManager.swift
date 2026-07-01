@@ -8,8 +8,8 @@ class DownloadManager: ObservableObject {
 
     /// Wires this manager up to a live client. Must be called before enqueue(_:)
     /// will actually attempt anything beyond adding a queued row to the list.
-    func attach(to client: SoulseekClient) {
-        let manager = TransferManager(client: client, peerManager: client.peerManager)
+    func attach(to client: SoulseekClient, settings: AppSettings) {
+        let manager = TransferManager(client: client, peerManager: client.peerManager, settings: settings)
         manager.onStateChange = { [weak self] id, state in
             guard let self else { return }
             guard let index = self.downloads.firstIndex(where: { $0.id == id }) else { return }

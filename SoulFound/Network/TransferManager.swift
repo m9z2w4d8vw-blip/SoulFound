@@ -31,6 +31,10 @@ final class TransferManager {
         var bytesReceived: UInt64 = 0
         var fileHandle: FileHandle?
         var destinationURL: URL?
+        /// Set when the destination folder came from a user-picked (non-sandbox)
+        /// location, so we know to balance the access call when the transfer
+        /// ends (success, failure, or cancellation).
+        var securityScopedFolderURL: URL?
 
         // Speed tracking: recomputed at most every 0.5s from the bytes/time
         // delta since the last computation, rather than per-chunk, since
@@ -54,10 +58,12 @@ final class TransferManager {
 
     private weak var client: SoulseekClient?
     private let peerManager: PeerConnectionManager
+    private let settings: AppSettings
 
-    init(client: SoulseekClient, peerManager: PeerConnectionManager) {
+    init(client: SoulseekClient, peerManager: PeerConnectionManager, settings: AppSettings) {
         self.client = client
         self.peerManager = peerManager
+        self.settings = settings
         peerManager.onIncomingFileConnection = { [weak self] connectionToken, conn in
             self?.beginReceivingFile(connectionToken: connectionToken, conn: conn)
         }
@@ -295,10 +301,20 @@ final class TransferManager {
                             }
                             resolvedTicket = ticket
 
-                            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                            let destURL = docs.appendingPathComponent(self.lastPathComponent(of: session.remotePath))
+                            let (folderURL, isScoped) = self.settings.resolveDownloadFolder()
+                            var scopedFolder: URL?
+                            if isScoped {
+                                if folderURL.startAccessingSecurityScopedResource() {
+                                    scopedFolder = folderURL
+                                } else {
+                                    DebugLog.shared.log("Could not access chosen download folder, falling back to app storage")
+                                }
+                            }
+                            let destFolder = scopedFolder ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                            let destURL = destFolder.appendingPathComponent(self.lastPathComponent(of: session.remotePath))
                             guard FileManager.default.createFile(atPath: destURL.path, contents: nil),
                                   let handle = try? FileHandle(forWritingTo: destURL) else {
+                                scopedFolder?.stopAccessingSecurityScopedResource()
                                 self.onStateChange?(session.downloadID, .failed(reason: "Could not create local file"))
                                 self.pendingByTicket.removeValue(forKey: ticket)
                                 conn.cancel()
@@ -306,6 +322,7 @@ final class TransferManager {
                             }
                             session.fileHandle = handle
                             session.destinationURL = destURL
+                            session.securityScopedFolderURL = scopedFolder
                             session.speedWindowStart = Date()
                             session.speedWindowStartBytes = 0
                             self.pendingByTicket[ticket] = session
@@ -368,6 +385,7 @@ final class TransferManager {
 
         if session.fileSize > 0, session.bytesReceived >= session.fileSize {
             session.fileHandle?.closeFile()
+            session.securityScopedFolderURL?.stopAccessingSecurityScopedResource()
             pendingByTicket.removeValue(forKey: ticket)
             conn.cancel() // we (the downloader) are responsible for closing — see protocol notes
             DebugLog.shared.log("Download complete: \(session.remotePath) (\(session.bytesReceived) bytes)")
@@ -381,6 +399,7 @@ final class TransferManager {
         if let url = session.destinationURL {
             try? FileManager.default.removeItem(at: url)
         }
+        session.securityScopedFolderURL?.stopAccessingSecurityScopedResource()
         pendingByTicket.removeValue(forKey: ticket)
         DebugLog.shared.log("Download failed: \(session.remotePath) — \(reason)")
         onStateChange?(session.downloadID, .failed(reason: reason))
