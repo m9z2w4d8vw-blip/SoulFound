@@ -32,6 +32,9 @@ struct SearchView: View {
                 if l != r { return l < r }
                 return (lhs.duration ?? -1) < (rhs.duration ?? -1)
             }
+        case .speed:
+            // Peers with no reported speed sort last, matching the .attributes convention above.
+            sorted = results.sorted { ($0.uploadSpeed ?? -1) < ($1.uploadSpeed ?? -1) }
         }
         return sortAscending ? sorted : sorted.reversed()
     }
@@ -141,6 +144,10 @@ struct SearchResultRow: View {
                         Text("•")
                         Text(result.formattedAttributes)
                     }
+                    if result.uploadSpeed != nil {
+                        Text("•")
+                        Text("\(result.formattedSpeed) KB/s")
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -164,6 +171,7 @@ enum SortField: String, CaseIterable {
     case file = "File"
     case size = "Size"
     case attributes = "Attributes"
+    case speed = "Speed"
 }
 
 /// Row of tappable chips mirroring the desktop client's sortable column headers.
@@ -178,7 +186,7 @@ struct SortBar: View {
             Text("Sort:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ForEach([SortField.file, .size, .attributes], id: \.self) { field in
+            ForEach([SortField.file, .size, .attributes, .speed], id: \.self) { field in
                 chip(field)
             }
             Spacer()

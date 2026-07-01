@@ -41,12 +41,16 @@ struct DownloadRow: View {
                 Text("Queued")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-            case .downloading(let progress):
+            case .downloading(let progress, let speed):
                 ProgressView(value: progress)
                     .tint(.blue)
-                Text("\(Int(progress * 100))%")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("\(Int(progress * 100))%")
+                    Text("•")
+                    Text(formattedSpeed(speed))
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             case .completed:
                 Label("Saved to Files", systemImage: "checkmark.circle.fill")
                     .font(.caption2)
@@ -58,5 +62,15 @@ struct DownloadRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// Formats bytes/sec as KB/s or MB/s, matching the precision the search
+    /// list uses for peer upload speed (one decimal place).
+    private func formattedSpeed(_ bytesPerSec: Double) -> String {
+        let kbPerSec = bytesPerSec / 1024
+        if kbPerSec >= 1024 {
+            return String(format: "%.1f MB/s", kbPerSec / 1024)
+        }
+        return String(format: "%.1f KB/s", kbPerSec)
     }
 }

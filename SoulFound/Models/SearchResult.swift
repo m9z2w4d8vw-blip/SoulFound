@@ -8,6 +8,11 @@ struct SearchResult: Identifiable {
     let bitrate: Int?
     let duration: Int?
     let remotePath: String
+    /// The peer's reported upload speed in bytes/sec, taken from the trailing
+    /// fields of the FileSearchResult message (after the file list). This is
+    /// per-*user*, not per-file — every result from the same peer in a given
+    /// response shares this value, matching the desktop client's "K/s" column.
+    let uploadSpeed: Int?
 
     var formattedSize: String {
         let formatter = ByteCountFormatter()
@@ -30,6 +35,14 @@ struct SearchResult: Identifiable {
     var displayFolder: String {
         let normalized = filename.replacingOccurrences(of: "\\", with: "/")
         return (normalized as NSString).deletingLastPathComponent
+    }
+
+    /// Matches the desktop client's "K/s" column: raw upload speed in KB/s to
+    /// one decimal place, e.g. "5918.3". "—" when the peer's response didn't
+    /// include it (shouldn't normally happen, but the field is defensively optional).
+    var formattedSpeed: String {
+        guard let uploadSpeed else { return "—" }
+        return String(format: "%.1f", Double(uploadSpeed) / 1024.0)
     }
 
     /// Matches the desktop client's "Attributes" column, e.g. "320kbps, 4m31s".

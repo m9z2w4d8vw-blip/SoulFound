@@ -2,7 +2,7 @@ import Foundation
 
 enum DownloadState {
     case queued
-    case downloading(progress: Double)
+    case downloading(progress: Double, speedBytesPerSec: Double)
     case completed
     case failed(reason: String)
 }
