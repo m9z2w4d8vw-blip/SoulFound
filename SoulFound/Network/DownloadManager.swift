@@ -33,4 +33,15 @@ class DownloadManager: ObservableObject {
         }
         transferManager.startDownload(id: item.id, username: result.username, remotePath: result.remotePath)
     }
+
+    /// Enqueues every file in a folder at once — the mobile equivalent of the
+    /// desktop client's "Download Folder" action. Each file becomes its own
+    /// DownloadItem row; TransferManager bounds how many run concurrently per
+    /// peer internally, so the rest just sit in the existing "Queued" state
+    /// until their turn.
+    func enqueueFolder(_ results: [SearchResult]) {
+        for result in results {
+            enqueue(result)
+        }
+    }
 }

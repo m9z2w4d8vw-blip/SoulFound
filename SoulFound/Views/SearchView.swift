@@ -9,6 +9,7 @@ struct SearchView: View {
     @State private var showLogin = false
     @State private var sortField: SortField = .none
     @State private var sortAscending = true
+    @State private var expandedFolders: Set<String> = []
 
     /// Sorted view over the current results. `.none` preserves the order results
     /// arrived in from peers (i.e. "Best Match" on the desktop client).
@@ -37,6 +38,46 @@ struct SearchView: View {
             sorted = results.sorted { ($0.uploadSpeed ?? -1) < ($1.uploadSpeed ?? -1) }
         }
         return sortAscending ? sorted : sorted.reversed()
+    }
+
+    /// Groups results by (username, folder) — exactly what the desktop client's
+    /// "Folder" column represents. A search like "Born To Die" can hit both a
+    /// single loose track (its own folder, one file) and a whole album shared
+    /// by another user (same folder, a dozen+ files); grouping makes that
+    /// distinction visible instead of dumping every file into one flat list
+    /// with no indication of what actually ships together.
+    ///
+    /// Only used in "Best Match" order (sortField == .none). Once the user
+    /// picks an explicit sort (File/Size/Attributes/Speed) they're asking for a
+    /// flat, file-level ranking — scattering that across folder cards would
+    /// undo the sort, so `sortedResults` is shown as a plain list instead.
+    private var groupedResults: [ResultGroup] {
+        var order: [String] = []
+        var buckets: [String: [SearchResult]] = [:]
+        for result in searchManager.results {
+            let key = "\(result.username)\u{0}\(result.displayFolder)"
+            if buckets[key] == nil {
+                buckets[key] = []
+                order.append(key)
+            }
+            buckets[key]?.append(result)
+        }
+        return order.compactMap { key in
+            guard let files = buckets[key], let first = files.first else { return nil }
+            if files.count > 1 {
+                return .folder(id: key, username: first.username, folder: first.displayFolder, files: files)
+            } else {
+                return .single(first)
+            }
+        }
+    }
+
+    private func toggleExpanded(_ id: String) {
+        if expandedFolders.contains(id) {
+            expandedFolders.remove(id)
+        } else {
+            expandedFolders.insert(id)
+        }
     }
 
     /// Tapping a chip cycles: off → ascending → descending → off. Tapping a
@@ -94,9 +135,32 @@ struct SearchView: View {
                     if !searchManager.results.isEmpty {
                         SortBar(sortField: sortField, sortAscending: sortAscending, toggle: toggleSort)
                     }
-                    List(sortedResults) { result in
-                        SearchResultRow(result: result) {
-                            downloadManager.enqueue(result)
+                    List {
+                        if sortField == .none {
+                            ForEach(groupedResults) { group in
+                                switch group {
+                                case .folder(_, let username, let folder, let files):
+                                    FolderGroupRow(
+                                        username: username,
+                                        folder: folder,
+                                        files: files,
+                                        isExpanded: expandedFolders.contains(group.id),
+                                        onToggle: { toggleExpanded(group.id) },
+                                        onDownloadAll: { downloadManager.enqueueFolder(files) },
+                                        onDownloadFile: { downloadManager.enqueue($0) }
+                                    )
+                                case .single(let result):
+                                    SearchResultRow(result: result) {
+                                        downloadManager.enqueue(result)
+                                    }
+                                }
+                            }
+                        } else {
+                            ForEach(sortedResults) { result in
+                                SearchResultRow(result: result) {
+                                    downloadManager.enqueue(result)
+                                }
+                            }
                         }
                     }
                     .listStyle(.plain)
@@ -161,6 +225,127 @@ struct SearchResultRow: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A row in the grouped ("Best Match") search view: either several files that
+/// share the same user+folder — an album, typically — or a single ungrouped
+/// file that didn't share its folder with anything else in these results.
+private enum ResultGroup: Identifiable {
+    case folder(id: String, username: String, folder: String, files: [SearchResult])
+    case single(SearchResult)
+
+    var id: String {
+        switch self {
+        case .folder(let id, _, _, _): return id
+        case .single(let result): return result.id.uuidString
+        }
+    }
+}
+
+/// Collapsible card for a folder containing multiple files from one peer —
+/// e.g. a whole shared album. Tapping the header expands/collapses the file
+/// list; "All" queues every file in the folder in one tap, mirroring the
+/// desktop client's "Download Folder" action.
+struct FolderGroupRow: View {
+    let username: String
+    let folder: String
+    let files: [SearchResult]
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    let onDownloadAll: () -> Void
+    let onDownloadFile: (SearchResult) -> Void
+
+    /// Soulseek folder paths are the full remote chain (e.g.
+    /// "Lana Del Rey/!pop-rnb-blues/mu/Born to Die (2012)"), backslash-separated
+    /// regardless of the sharer's OS. Showing just the last component ("Born to
+    /// Die (2012)") is what people actually recognize as the album name.
+    private var folderDisplayName: String {
+        let normalized = folder.replacingOccurrences(of: "\\", with: "/")
+        let name = (normalized as NSString).lastPathComponent
+        return name.isEmpty ? folder : name
+    }
+
+    private var formattedTotalSize: String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB, .useKB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: files.reduce(0) { $0 + $1.size })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: onToggle) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(.orange)
+                        .font(.title3)
+                        .frame(width: 20)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(folderDisplayName)
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        Text(username)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("\(files.count) files • \(formattedTotalSize)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onDownloadAll) {
+                Label("Download folder (\(files.count) files)", systemImage: "arrow.down.circle.fill")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.blue)
+            .padding(.leading, 30)
+            .padding(.top, 6)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(files) { file in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(file.displayFilename)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                Text(file.formattedSize)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                            Button {
+                                onDownloadFile(file)
+                            } label: {
+                                Image(systemName: "arrow.down.circle")
+                                    .foregroundStyle(.blue)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .padding(.leading, 30)
+                .padding(.top, 8)
+            }
+        }
+        .padding(.vertical, 6)
     }
 }
 

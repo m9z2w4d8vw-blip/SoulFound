@@ -20,6 +20,13 @@ import Network
 /// connection method is attempted for step 1. If a peer can't be reached
 /// directly, the download fails — there's no way for them to reach us back
 /// for the initial P connection either.
+///
+/// Concurrency: each in-flight request to a peer gets its own NWConnection and
+/// its own downloadID/remotePath threaded through the closures that handle it
+/// (rather than a shared username-keyed dict), so multiple simultaneous
+/// downloads from the same peer — e.g. "Download Folder" queuing 16 tracks at
+/// once — don't clobber each other's session state. `requestQueue`/`activeCount`
+/// below just bound *how many* of those run at once per peer.
 @MainActor
 final class TransferManager {
 
@@ -44,14 +51,31 @@ final class TransferManager {
         var currentSpeed: Double = 0
     }
 
-    /// Sessions that have sent QueueUpload and are waiting for the peer's
-    /// TransferRequest on the P connection. Keyed by username since we only
-    /// support one in-flight request per peer at a time.
-    private var pendingByUsername: [String: Session] = [:]
+    /// A request that's been asked for but hasn't started connecting yet.
+    private struct QueuedRequest {
+        let downloadID: UUID
+        let remotePath: String
+    }
 
     /// Sessions that have received TransferRequest and are waiting for the
-    /// matching file ('F') connection to arrive. Keyed by the transfer ticket.
+    /// matching file ('F') connection to arrive. Keyed by the transfer ticket,
+    /// which is globally unique (assigned by the peer), so this is safe even
+    /// with several transfers to the same peer in flight simultaneously.
     private var pendingByTicket: [UInt32: Session] = [:]
+
+    /// Requests waiting for a free concurrency slot, per peer.
+    private var requestQueue: [String: [QueuedRequest]] = [:]
+
+    /// How many in-flight transfers (P connection open through the very end of
+    /// the F connection) we allow to the same peer at once. A folder download
+    /// can queue dozens of files instantly; without a cap we'd try to open that
+    /// many raw TCP connections to one peer simultaneously, which is both
+    /// antisocial to the peer and a good way to trip mobile network connection
+    /// limits. Requests past the cap just sit in `requestQueue` and start as
+    /// earlier ones finish — that's exactly the existing "Queued" state, so no
+    /// new UI concept was needed for it.
+    private let maxConcurrentPerPeer = 3
+    private var activeCount: [String: Int] = [:]
 
     /// Fired whenever a download's state changes so DownloadManager can update the UI.
     var onStateChange: ((UUID, DownloadState) -> Void)?
@@ -72,36 +96,72 @@ final class TransferManager {
     // MARK: - Public API
 
     func startDownload(id: UUID, username: String, remotePath: String) {
-        guard let client else { return }
-        pendingByUsername[username] = Session(downloadID: id, username: username, remotePath: remotePath)
         onStateChange?(id, .queued)
+        requestQueue[username, default: []].append(QueuedRequest(downloadID: id, remotePath: remotePath))
+        pumpQueue(for: username)
+    }
 
-        Task {
-            do {
-                DebugLog.shared.log("Download: resolving address for \(username)")
-                let address = try await client.getPeerAddress(username: username)
-                guard address.ip != 0, address.port > 0 else {
-                    throw SoulseekError.connectionFailed("\(username) is not directly reachable")
-                }
-                try await connectAndRequest(
-                    ip: address.ip,
-                    port: address.port,
-                    myUsername: client.username,
-                    peerUsername: username,
-                    remotePath: remotePath
-                )
-            } catch {
-                let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                DebugLog.shared.log("Download request failed for \(username): \(reason)")
-                onStateChange?(id, .failed(reason: reason))
-                pendingByUsername.removeValue(forKey: username)
+    // MARK: - Per-peer concurrency queue
+
+    /// Starts as many queued requests for this peer as the concurrency cap
+    /// allows. Called both when new requests are added and whenever an
+    /// in-flight one finishes (success or failure), so the next queued file
+    /// immediately takes its place.
+    private func pumpQueue(for username: String) {
+        while (activeCount[username] ?? 0) < maxConcurrentPerPeer {
+            guard var queue = requestQueue[username], !queue.isEmpty else { return }
+            let next = queue.removeFirst()
+            requestQueue[username] = queue.isEmpty ? nil : queue
+            activeCount[username, default: 0] += 1
+
+            Task {
+                await runDownload(id: next.downloadID, username: username, remotePath: next.remotePath)
             }
+        }
+    }
+
+    /// Frees this peer's concurrency slot and immediately tries to start the
+    /// next queued request for them, if any.
+    private func finishSlot(for username: String) {
+        activeCount[username] = max(0, (activeCount[username] ?? 1) - 1)
+        pumpQueue(for: username)
+    }
+
+    private func runDownload(id: UUID, username: String, remotePath: String) async {
+        guard let client else {
+            finishSlot(for: username)
+            return
+        }
+        do {
+            DebugLog.shared.log("Download: resolving address for \(username)")
+            let address = try await client.getPeerAddress(username: username)
+            guard address.ip != 0, address.port > 0 else {
+                throw SoulseekError.connectionFailed("\(username) is not directly reachable")
+            }
+            try await connectAndRequest(
+                id: id,
+                ip: address.ip,
+                port: address.port,
+                myUsername: client.username,
+                peerUsername: username,
+                remotePath: remotePath
+            )
+            // connectAndRequest only awaits the P connection reaching TransferRequest
+            // territory — the transfer itself continues asynchronously via the
+            // incoming F connection (see beginReceivingFile). This peer slot stays
+            // occupied until that resolves; appendFileBytes/finishFailed/the P
+            // connection's own close handler call finishSlot(for:) once it does.
+        } catch {
+            let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            DebugLog.shared.log("Download request failed for \(username): \(reason)")
+            onStateChange?(id, .failed(reason: reason))
+            finishSlot(for: username)
         }
     }
 
     // MARK: - P connection: PeerInit, QueueUpload, await TransferRequest
 
-    private func connectAndRequest(ip: UInt32, port: UInt16, myUsername: String, peerUsername: String, remotePath: String) async throws {
+    private func connectAndRequest(id: UUID, ip: UInt32, port: UInt16, myUsername: String, peerUsername: String, remotePath: String) async throws {
         let ipString = "\((ip >> 24) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 8) & 0xFF).\(ip & 0xFF)"
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw SoulseekError.connectionFailed("Invalid port")
@@ -165,7 +225,7 @@ final class TransferManager {
         conn.send(content: buildPeerMessage(code: 43, body: queueBody), completion: .idempotent)
         DebugLog.shared.log("Download: sent QueueUpload \"\(remotePath)\" to \(peerUsername)")
 
-        startReceivingPeerMessages(conn: conn, peerUsername: peerUsername)
+        startReceivingPeerMessages(conn: conn, downloadID: id, peerUsername: peerUsername, remotePath: remotePath)
     }
 
     private func buildPeerMessage(code: UInt32, body: Data) -> Data {
@@ -176,8 +236,9 @@ final class TransferManager {
         return msg
     }
 
-    private func startReceivingPeerMessages(conn: NWConnection, peerUsername: String) {
+    private func startReceivingPeerMessages(conn: NWConnection, downloadID: UUID, peerUsername: String, remotePath: String) {
         let box = TransferBufferBox()
+        let state = PConnectionState()
 
         func doReceive() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
@@ -185,9 +246,20 @@ final class TransferManager {
                     guard let self else { return }
                     if let data {
                         box.data.append(data)
-                        self.drainPeerBuffer(box: box, conn: conn, peerUsername: peerUsername)
+                        self.drainPeerBuffer(box: box, conn: conn, downloadID: downloadID, peerUsername: peerUsername, remotePath: remotePath, state: state)
                     }
                     if error != nil || isComplete {
+                        // If this P connection closed without ever handing us a
+                        // TransferRequest, the file was never actually queued — e.g.
+                        // the peer rejected it, or dropped the connection. Previously
+                        // this failed silently (no state change, slot never freed),
+                        // which meant one unresponsive peer could permanently stall
+                        // part of a folder download.
+                        if !state.transferRequestHandled {
+                            DebugLog.shared.log("P connection to \(peerUsername) closed before TransferRequest for \"\(remotePath)\"")
+                            self.onStateChange?(downloadID, .failed(reason: "\(peerUsername) didn't queue the file"))
+                            self.finishSlot(for: peerUsername)
+                        }
                         return
                     }
                     doReceive()
@@ -197,7 +269,7 @@ final class TransferManager {
         doReceive()
     }
 
-    private func drainPeerBuffer(box: TransferBufferBox, conn: NWConnection, peerUsername: String) {
+    private func drainPeerBuffer(box: TransferBufferBox, conn: NWConnection, downloadID: UUID, peerUsername: String, remotePath: String, state: PConnectionState) {
         var buf = Data(box.data)
         box.data = Data()
 
@@ -214,14 +286,15 @@ final class TransferManager {
 
             DebugLog.shared.log("Download P-message from \(peerUsername) code:\(code) size:\(body.count)")
             if code == 40 {
-                handleTransferRequest(body: body, conn: conn, peerUsername: peerUsername)
+                state.transferRequestHandled = true
+                handleTransferRequest(body: body, conn: conn, downloadID: downloadID, peerUsername: peerUsername, remotePath: remotePath)
             }
         }
     }
 
     // MARK: - TransferRequest / TransferResponse (peer codes 40 / 41)
 
-    private func handleTransferRequest(body: Data, conn: NWConnection, peerUsername: String) {
+    private func handleTransferRequest(body: Data, conn: NWConnection, downloadID: UUID, peerUsername: String, remotePath: String) {
         var offset = 0
         guard offset + 4 <= body.count else { return }
         let direction = body.readUInt32(at: offset); offset += 4
@@ -236,9 +309,7 @@ final class TransferManager {
             fileSize = lo | (hi << 32)
         }
 
-        guard var session = pendingByUsername[peerUsername] else { return }
-        session.fileSize = fileSize
-        pendingByUsername.removeValue(forKey: peerUsername)
+        let session = Session(downloadID: downloadID, username: peerUsername, remotePath: remotePath, fileSize: fileSize)
         pendingByTicket[ticket] = session
 
         DebugLog.shared.log("TransferRequest from \(peerUsername) ticket:\(ticket) size:\(fileSize)")
@@ -251,7 +322,7 @@ final class TransferManager {
         replyBody.append(1)
         conn.send(content: buildPeerMessage(code: 41, body: replyBody), completion: .idempotent)
 
-        onStateChange?(session.downloadID, .downloading(progress: 0, speedBytesPerSec: 0))
+        onStateChange?(downloadID, .downloading(progress: 0, speedBytesPerSec: 0))
         conn.cancel()
     }
 
@@ -317,6 +388,7 @@ final class TransferManager {
                                 scopedFolder?.stopAccessingSecurityScopedResource()
                                 self.onStateChange?(session.downloadID, .failed(reason: "Could not create local file"))
                                 self.pendingByTicket.removeValue(forKey: ticket)
+                                self.finishSlot(for: session.username)
                                 conn.cancel()
                                 return
                             }
@@ -390,6 +462,7 @@ final class TransferManager {
             conn.cancel() // we (the downloader) are responsible for closing — see protocol notes
             DebugLog.shared.log("Download complete: \(session.remotePath) (\(session.bytesReceived) bytes)")
             onStateChange?(session.downloadID, .completed)
+            finishSlot(for: session.username)
         }
     }
 
@@ -403,6 +476,7 @@ final class TransferManager {
         pendingByTicket.removeValue(forKey: ticket)
         DebugLog.shared.log("Download failed: \(session.remotePath) — \(reason)")
         onStateChange?(session.downloadID, .failed(reason: reason))
+        finishSlot(for: session.username)
     }
 
     /// Soulseek filenames use Windows-style backslash paths (e.g.
@@ -417,4 +491,12 @@ final class TransferManager {
 
 private class TransferBufferBox: @unchecked Sendable {
     var data = Data()
+}
+
+/// Tracks, for a single P connection, whether we've already handled its
+/// TransferRequest — so if the connection closes before one ever arrives, we
+/// know to report a failure and free the peer's concurrency slot instead of
+/// silently doing nothing.
+private final class PConnectionState: @unchecked Sendable {
+    var transferRequestHandled = false
 }
