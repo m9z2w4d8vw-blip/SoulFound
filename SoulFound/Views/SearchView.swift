@@ -7,6 +7,48 @@ struct SearchView: View {
 
     @State private var query = ""
     @State private var showLogin = false
+    @State private var sortField: SortField = .none
+    @State private var sortAscending = true
+
+    /// Sorted view over the current results. `.none` preserves the order results
+    /// arrived in from peers (i.e. "Best Match" on the desktop client).
+    private var sortedResults: [SearchResult] {
+        let results = searchManager.results
+        let sorted: [SearchResult]
+        switch sortField {
+        case .none:
+            return results
+        case .file:
+            sorted = results.sorted {
+                $0.displayFilename.localizedStandardCompare($1.displayFilename) == .orderedAscending
+            }
+        case .size:
+            sorted = results.sorted { $0.size < $1.size }
+        case .attributes:
+            // Bitrate first (files with no bitrate info sort last), then duration as a tiebreaker.
+            sorted = results.sorted { lhs, rhs in
+                let l = lhs.bitrate ?? -1
+                let r = rhs.bitrate ?? -1
+                if l != r { return l < r }
+                return (lhs.duration ?? -1) < (rhs.duration ?? -1)
+            }
+        }
+        return sortAscending ? sorted : sorted.reversed()
+    }
+
+    /// Tapping a chip cycles: off → ascending → descending → off. Tapping a
+    /// different field starts it fresh at ascending — same feel as clicking a
+    /// column header in the desktop client.
+    private func toggleSort(_ field: SortField) {
+        if sortField != field {
+            sortField = field
+            sortAscending = true
+        } else if sortAscending {
+            sortAscending = false
+        } else {
+            sortField = .none
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -46,7 +88,10 @@ struct SearchView: View {
                     ContentUnavailableView("No results", systemImage: "doc.magnifyingglass", description: Text("Try a different search term"))
                     Spacer()
                 } else {
-                    List(searchManager.results) { result in
+                    if !searchManager.results.isEmpty {
+                        SortBar(sortField: sortField, sortAscending: sortAscending, toggle: toggleSort)
+                    }
+                    List(sortedResults) { result in
                         SearchResultRow(result: result) {
                             downloadManager.enqueue(result)
                         }
@@ -84,15 +129,21 @@ struct SearchResultRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text(result.filename)
+                Text(result.displayFilename)
                     .font(.subheadline)
                     .lineLimit(2)
                 Text(result.username)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(result.formattedSize)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text(result.formattedSize)
+                    if result.bitrate != nil || result.duration != nil {
+                        Text("•")
+                        Text(result.formattedAttributes)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
             Spacer()
             Button(action: onDownload) {
@@ -103,6 +154,59 @@ struct SearchResultRow: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// What a search result list can be sorted by. `.none` means "as received" (the
+/// desktop client's "Best Match" / unsorted order).
+enum SortField: String, CaseIterable {
+    case none
+    case file = "File"
+    case size = "Size"
+    case attributes = "Attributes"
+}
+
+/// Row of tappable chips mirroring the desktop client's sortable column headers.
+/// Tapping cycles a field through ascending → descending → off.
+struct SortBar: View {
+    let sortField: SortField
+    let sortAscending: Bool
+    let toggle: (SortField) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Sort:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach([SortField.file, .size, .attributes], id: \.self) { field in
+                chip(field)
+            }
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+
+    private func chip(_ field: SortField) -> some View {
+        let isActive = sortField == field
+        return Button {
+            toggle(field)
+        } label: {
+            HStack(spacing: 4) {
+                Text(field.rawValue)
+                if isActive {
+                    Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(isActive ? Color.blue.opacity(0.15) : Color(.secondarySystemBackground))
+            .foregroundStyle(isActive ? .blue : .primary)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
