@@ -96,14 +96,25 @@ final class TransferManager {
         let conn = NWConnection(host: NWEndpoint.Host(ipString), port: nwPort, using: .tcp)
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            // `stateUpdateHandler` stays attached for the connection's entire lifetime,
+            // not just until we resume — e.g. handleTransferRequest calls conn.cancel()
+            // later, which fires this same closure again with .cancelled. Without this
+            // guard, that second call to cont.resume() is a fatal error (CheckedContinuation
+            // traps on double-resume) — this was the cause of the crash on successful
+            // downloads.
+            var hasResumed = false
             conn.stateUpdateHandler = { state in
                 Task { @MainActor in
+                    guard !hasResumed else { return }
                     switch state {
                     case .ready:
+                        hasResumed = true
                         cont.resume()
                     case .failed(let err):
+                        hasResumed = true
                         cont.resume(throwing: SoulseekError.connectionFailed(err.localizedDescription))
                     case .cancelled:
+                        hasResumed = true
                         cont.resume(throwing: SoulseekError.connectionFailed("Connection cancelled"))
                     default:
                         break
@@ -111,6 +122,18 @@ final class TransferManager {
                 }
             }
             conn.start(queue: .main)
+
+            // Watchdog: an unreachable peer (firewalled, offline, bad IP) can leave the
+            // connection sitting in .waiting forever — stateUpdateHandler never fires a
+            // terminal case, so resume() never gets called and the download is stuck in
+            // "Queued" with no feedback. Time it out instead.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !hasResumed else { return }
+                hasResumed = true
+                conn.cancel()
+                cont.resume(throwing: SoulseekError.connectionFailed("Timed out connecting to \(peerUsername)"))
+            }
         }
 
         DebugLog.shared.log("Download: connected directly to \(peerUsername) at \(ipString):\(port)")

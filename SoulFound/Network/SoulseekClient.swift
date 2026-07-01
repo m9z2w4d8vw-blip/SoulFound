@@ -26,6 +26,19 @@ enum SoulseekError: LocalizedError {
 }
 
 // MARK: - SoulseekClient
+
+/// Reference-type wrapper around a pending getPeerAddress(_:) continuation. Wrapping it
+/// lets both the "server actually replied" path and the "timeout fired" path check/set
+/// `resumed` and identify this exact pending request (via `===`), so whichever happens
+/// first wins and the continuation is never resumed twice.
+private final class PendingPeerAddress {
+    let continuation: CheckedContinuation<(ip: UInt32, port: UInt16), Error>
+    var resumed = false
+    init(_ continuation: CheckedContinuation<(ip: UInt32, port: UInt16), Error>) {
+        self.continuation = continuation
+    }
+}
+
 @MainActor
 class SoulseekClient: ObservableObject {
     @Published var isConnected = false
@@ -38,7 +51,7 @@ class SoulseekClient: ObservableObject {
     private var connection: NWConnection?
     private var receiveBuffer = Data()
     private var loginContinuation: CheckedContinuation<Void, Error>?
-    private var peerAddressContinuations: [String: [CheckedContinuation<(ip: UInt32, port: UInt16), Error>]] = [:]
+    private var peerAddressContinuations: [String: [PendingPeerAddress]] = [:]
 
     let peerManager = PeerConnectionManager()
 
@@ -61,13 +74,22 @@ class SoulseekClient: ObservableObject {
         self.connection = conn
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            // Same guard as TransferManager.connectAndRequest — stateUpdateHandler stays
+            // attached for the life of the connection, so a later .failed/.cancelled
+            // (e.g. the server dropping us mid-session) must not resume this continuation
+            // a second time.
+            var hasResumed = false
             conn.stateUpdateHandler = { state in
+                guard !hasResumed else { return }
                 switch state {
                 case .ready:
+                    hasResumed = true
                     cont.resume()
                 case .failed(let error):
+                    hasResumed = true
                     cont.resume(throwing: SoulseekError.connectionFailed(error.localizedDescription))
                 case .cancelled:
+                    hasResumed = true
                     cont.resume(throwing: SoulseekError.connectionFailed("Connection cancelled"))
                 default:
                     break
@@ -131,10 +153,26 @@ class SoulseekClient: ObservableObject {
     func getPeerAddress(username: String) async throws -> (ip: UInt32, port: UInt16) {
         guard isConnected else { throw SoulseekError.notConnected }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(ip: UInt32, port: UInt16), Error>) in
-            peerAddressContinuations[username, default: []].append(cont)
+            let pending = PendingPeerAddress(cont)
+            peerAddressContinuations[username, default: []].append(pending)
+
             var body = Data()
             body.appendSlskString(username)
             send(buildMessage(code: 3, body: body))
+
+            // The server won't reply at all for an offline/nonexistent user, which would
+            // otherwise leave this continuation — and the download that's awaiting it —
+            // stuck forever with the item sitting in "Queued".
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self, !pending.resumed else { return }
+                pending.resumed = true
+                if var conts = self.peerAddressContinuations[username] {
+                    conts.removeAll { $0 === pending }
+                    self.peerAddressContinuations[username] = conts.isEmpty ? nil : conts
+                }
+                cont.resume(throwing: SoulseekError.connectionFailed("\(username) did not respond (offline?)"))
+            }
         }
     }
 
@@ -338,9 +376,11 @@ class SoulseekClient: ObservableObject {
         let port = body.readUInt32(at: offset)
 
         guard var conts = peerAddressContinuations[username], !conts.isEmpty else { return }
-        let cont = conts.removeFirst()
+        let pending = conts.removeFirst()
         peerAddressContinuations[username] = conts.isEmpty ? nil : conts
-        cont.resume(returning: (ip: ip, port: UInt16(truncatingIfNeeded: port)))
+        guard !pending.resumed else { return }  // already timed out — don't resume twice
+        pending.resumed = true
+        pending.continuation.resume(returning: (ip: ip, port: UInt16(truncatingIfNeeded: port)))
     }
 
     // MARK: - ConnectToPeer (server code 18)
