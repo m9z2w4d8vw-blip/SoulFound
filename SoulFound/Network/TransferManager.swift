@@ -31,6 +31,13 @@ final class TransferManager {
         var bytesReceived: UInt64 = 0
         var fileHandle: FileHandle?
         var destinationURL: URL?
+
+        // Speed tracking: recomputed at most every 0.5s from the bytes/time
+        // delta since the last computation, rather than per-chunk, since
+        // chunk sizes/arrival timing are too jittery for a readable number.
+        var speedWindowStart: Date = Date()
+        var speedWindowStartBytes: UInt64 = 0
+        var currentSpeed: Double = 0
     }
 
     /// Sessions that have sent QueueUpload and are waiting for the peer's
@@ -238,7 +245,7 @@ final class TransferManager {
         replyBody.append(1)
         conn.send(content: buildPeerMessage(code: 41, body: replyBody), completion: .idempotent)
 
-        onStateChange?(session.downloadID, .downloading(progress: 0))
+        onStateChange?(session.downloadID, .downloading(progress: 0, speedBytesPerSec: 0))
         conn.cancel()
     }
 
@@ -299,6 +306,8 @@ final class TransferManager {
                             }
                             session.fileHandle = handle
                             session.destinationURL = destURL
+                            session.speedWindowStart = Date()
+                            session.speedWindowStartBytes = 0
                             self.pendingByTicket[ticket] = session
 
                             DebugLog.shared.log("Matched incoming file connection to ticket:\(ticket) (connToken:\(connectionToken)) — writing to \(destURL.lastPathComponent)")
@@ -342,10 +351,20 @@ final class TransferManager {
         guard var session = pendingByTicket[ticket] else { return }
         session.fileHandle?.write(chunk)
         session.bytesReceived += UInt64(chunk.count)
+
+        // Recompute speed at most every 0.5s so the number is stable/readable
+        // rather than swinging wildly with each network chunk.
+        let elapsed = Date().timeIntervalSince(session.speedWindowStart)
+        if elapsed >= 0.5 {
+            let bytesThisWindow = session.bytesReceived - session.speedWindowStartBytes
+            session.currentSpeed = Double(bytesThisWindow) / elapsed
+            session.speedWindowStart = Date()
+            session.speedWindowStartBytes = session.bytesReceived
+        }
         pendingByTicket[ticket] = session
 
         let progress = session.fileSize > 0 ? Double(session.bytesReceived) / Double(session.fileSize) : 0
-        onStateChange?(session.downloadID, .downloading(progress: min(progress, 1.0)))
+        onStateChange?(session.downloadID, .downloading(progress: min(progress, 1.0), speedBytesPerSec: session.currentSpeed))
 
         if session.fileSize > 0, session.bytesReceived >= session.fileSize {
             session.fileHandle?.closeFile()

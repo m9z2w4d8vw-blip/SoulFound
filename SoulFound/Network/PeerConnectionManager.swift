@@ -195,11 +195,38 @@ class PeerConnectionManager {
 
         DebugLog.shared.log("Search result from \(senderUsername) resultToken:\(resultToken) myToken:\(token)")
 
-        let results = parseFileList(data: decompressed, username: senderUsername, startOffset: offset)
-        DebugLog.shared.log("Parsed \(results.count) files from \(senderUsername)")
+        let (parsedResults, endOffset) = parseFileList(data: decompressed, username: senderUsername, startOffset: offset)
+        DebugLog.shared.log("Parsed \(parsedResults.count) files from \(senderUsername)")
 
-        guard !results.isEmpty else { return }
-onSearchResults?(results, resultToken)
+        guard !parsedResults.isEmpty else { return }
+
+        // Trailing per-user fields right after the file list: freeUploadSlots
+        // (1 byte), then uploadSpeed (uint32, bytes/sec) — this is what the
+        // desktop client shows in its "K/s" column. There's a queueLength
+        // field after that which we don't need. Missing/short data just
+        // means we display "—" for speed rather than dropping the results.
+        var trailerOffset = endOffset
+        var uploadSpeed: Int?
+        if trailerOffset + 1 <= decompressed.count {
+            trailerOffset += 1 // freeUploadSlots
+            if trailerOffset + 4 <= decompressed.count {
+                uploadSpeed = Int(decompressed.readUInt32(at: trailerOffset))
+            }
+        }
+
+        let results = parsedResults.map { result in
+            SearchResult(
+                username: result.username,
+                filename: result.filename,
+                size: result.size,
+                bitrate: result.bitrate,
+                duration: result.duration,
+                remotePath: result.remotePath,
+                uploadSpeed: uploadSpeed
+            )
+        }
+
+        onSearchResults?(results, resultToken)
     }
 
     private func zlibDecompress(_ data: Data) -> Data? {
@@ -228,13 +255,13 @@ onSearchResults?(results, resultToken)
     return destination.prefix(result)
 }
 
-    private func parseFileList(data: Data, username: String, startOffset: Int) -> [SearchResult] {
+    private func parseFileList(data: Data, username: String, startOffset: Int) -> (results: [SearchResult], endOffset: Int) {
         var offset = startOffset
         var results: [SearchResult] = []
 
-        guard offset + 4 <= data.count else { return results }
+        guard offset + 4 <= data.count else { return (results, offset) }
         let fileCount = Int(data.readUInt32(at: offset)); offset += 4
-        guard fileCount > 0, fileCount < 10_000 else { return results }
+        guard fileCount > 0, fileCount < 10_000 else { return (results, offset) }
 
         for _ in 0..<fileCount {
             guard offset < data.count else { break }
@@ -270,10 +297,11 @@ onSearchResults?(results, resultToken)
                 size: Int64(fileSize),
                 bitrate: bitrate > 0 ? Int(bitrate) : nil,
                 duration: duration > 0 ? Int(duration) : nil,
-                remotePath: filename
+                remotePath: filename,
+                uploadSpeed: nil // filled in by the caller once the trailing fields are read
             ))
         }
-        return results
+        return (results, offset)
     }
 }
 
