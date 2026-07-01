@@ -29,12 +29,23 @@ class DebugLog: @unchecked Sendable {
 class PeerConnectionManager {
 
     var onSearchResults: (([SearchResult], UInt32) -> Void)?
+
+    /// Fired when an incoming indirect connection turns out to be a file ('F')
+    /// connection rather than a peer ('P') connection — i.e. a peer we asked to
+    /// upload a file to us has dialed back in. Ownership of the raw NWConnection
+    /// passes to whoever is listening (TransferManager); this class stops
+    /// managing it (no more timeout/parsing) as soon as this fires.
+    var onIncomingFileConnection: ((UInt32, NWConnection) -> Void)?
+
     let listenPort: Int = 0
     private var activeConnections: [UInt32: NWConnection] = [:]
 
     func startListening() {}
 
-    func connectOut(toIP ip: UInt32, port: UInt16, token: UInt32, peerUsername: String) {
+    /// Dials a peer that we were told (via a server ConnectToPeer message) wants
+    /// an indirect connection to us. `type` is "P" (peer messaging, e.g. search
+    /// result delivery) or "F" (file transfer) — see SLSKPROTOCOL.html.
+    func connectOut(toIP ip: UInt32, port: UInt16, token: UInt32, peerUsername: String, type: String) {
         let ipString = "\((ip >> 24) & 0xFF).\((ip >> 16) & 0xFF).\((ip >> 8) & 0xFF).\(ip & 0xFF)"
         guard port > 0 else { return }
         let host = NWEndpoint.Host(ipString)
@@ -42,16 +53,23 @@ class PeerConnectionManager {
 
         let conn = NWConnection(host: host, port: nwPort, using: .tcp)
         activeConnections[token] = conn
-        DebugLog.shared.log("Dialing peer \(peerUsername) at \(ipString):\(port) token:\(token)")
+        DebugLog.shared.log("Dialing peer \(peerUsername) at \(ipString):\(port) token:\(token) type:\(type)")
 
         conn.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    DebugLog.shared.log("Connected to peer token:\(token)")
+                    DebugLog.shared.log("Connected to peer token:\(token) type:\(type)")
                     self.sendPierceFireWall(conn: conn, token: token)
-                    self.receivePeer(conn: conn, token: token)
+                    if type == "F" {
+                        // Hand off entirely — file connections use raw framing
+                        // (ticket + offset + bytes), not the P message format.
+                        self.activeConnections.removeValue(forKey: token)
+                        self.onIncomingFileConnection?(token, conn)
+                    } else {
+                        self.receivePeer(conn: conn, token: token)
+                    }
                 case .failed(let err):
                     DebugLog.shared.log("Peer connection failed token:\(token) err:\(err)")
                     self.activeConnections.removeValue(forKey: token)

@@ -18,6 +18,7 @@
 		B009 /* DownloadItem.swift */ = {isa = PBXBuildFile; fileRef = A009 /* DownloadItem.swift */; };
 		B010 /* Assets.xcassets */ = {isa = PBXBuildFile; fileRef = A010 /* Assets.xcassets */; };
 		B011 /* PeerConnectionManager.swift */ = {isa = PBXBuildFile; fileRef = A011b /* PeerConnectionManager.swift */; };
+		B012 /* TransferManager.swift */ = {isa = PBXBuildFile; fileRef = A012 /* TransferManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 		A010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A011b /* PeerConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PeerConnectionManager.swift; path = Network/PeerConnectionManager.swift; sourceTree = "<group>"; };
+		A012 /* TransferManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TransferManager.swift; path = Network/TransferManager.swift; sourceTree = "<group>"; };
 		PROD /* SoulFound.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SoulFound.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -83,6 +85,7 @@
 				A006 /* SearchManager.swift */,
 				A007 /* DownloadManager.swift */,
 				A011b /* PeerConnectionManager.swift */,
+				A012 /* TransferManager.swift */,
 			);
 			name = Network;
 			sourceTree = "<group>";
@@ -174,6 +177,7 @@
 				B008 /* SearchResult.swift */,
 				B009 /* DownloadItem.swift */,
 				B011 /* PeerConnectionManager.swift */,
+				B012 /* TransferManager.swift */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -38,6 +38,7 @@ class SoulseekClient: ObservableObject {
     private var connection: NWConnection?
     private var receiveBuffer = Data()
     private var loginContinuation: CheckedContinuation<Void, Error>?
+    private var peerAddressContinuations: [String: [CheckedContinuation<(ip: UInt32, port: UInt16), Error>]] = [:]
 
     let peerManager = PeerConnectionManager()
 
@@ -122,6 +123,19 @@ class SoulseekClient: ObservableObject {
     /// so old entries don't pile up in memory across many searches in one session.
     func clearSearchResults(for token: UInt32) {
         searchResultsByToken.removeValue(forKey: token)
+    }
+
+    /// Asks the server for a peer's IP/port so we can dial them directly — used
+    /// when we (not they) are the one initiating a connection, e.g. to request
+    /// a download. See GetPeerAddress (server code 3) in SLSKPROTOCOL.html.
+    func getPeerAddress(username: String) async throws -> (ip: UInt32, port: UInt16) {
+        guard isConnected else { throw SoulseekError.notConnected }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(ip: UInt32, port: UInt16), Error>) in
+            peerAddressContinuations[username, default: []].append(cont)
+            var body = Data()
+            body.appendSlskString(username)
+            send(buildMessage(code: 3, body: body))
+        }
     }
 
     // MARK: - Login message (Server code 1)
@@ -281,6 +295,8 @@ class SoulseekClient: ObservableObject {
         switch code {
         case 1:
             handleLoginResponse(body: body)
+        case 3:
+            handleGetPeerAddress(body: body)
         case 18:
             DebugLog.shared.log("ConnectToPeer received")
             handleConnectToPeer(body: body)
@@ -306,6 +322,25 @@ class SoulseekClient: ObservableObject {
             loginContinuation?.resume(throwing: SoulseekError.loginFailed(reason))
         }
         loginContinuation = nil
+    }
+
+    // MARK: - GetPeerAddress (server code 3)
+
+    /// Resolves a peer's IP/port so we can dial out to them directly (used when
+    /// initiating a download). See GetPeerAddress in SLSKPROTOCOL.html: username,
+    /// ip, port, obfuscation type, obfuscated port — we only need ip/port.
+    private func handleGetPeerAddress(body: Data) {
+        var offset = 0
+        guard let username = body.readSlskString(at: &offset) else { return }
+        guard offset + 4 <= body.count else { return }
+        let ip = body.readUInt32(at: offset); offset += 4
+        guard offset + 4 <= body.count else { return }
+        let port = body.readUInt32(at: offset)
+
+        guard var conts = peerAddressContinuations[username], !conts.isEmpty else { return }
+        let cont = conts.removeFirst()
+        peerAddressContinuations[username] = conts.isEmpty ? nil : conts
+        cont.resume(returning: (ip: ip, port: UInt16(truncatingIfNeeded: port)))
     }
 
     // MARK: - ConnectToPeer (server code 18)
@@ -334,7 +369,8 @@ class SoulseekClient: ObservableObject {
             toIP: ip,
             port: UInt16(truncatingIfNeeded: port),
             token: token,
-            peerUsername: peerUsername
+            peerUsername: peerUsername,
+            type: type
         )
     }
 }
