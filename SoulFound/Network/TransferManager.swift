@@ -51,8 +51,8 @@ final class TransferManager {
     init(client: SoulseekClient, peerManager: PeerConnectionManager) {
         self.client = client
         self.peerManager = peerManager
-        peerManager.onIncomingFileConnection = { [weak self] token, conn in
-            self?.beginReceivingFile(ticket: token, conn: conn)
+        peerManager.onIncomingFileConnection = { [weak self] connectionToken, conn in
+            self?.beginReceivingFile(connectionToken: connectionToken, conn: conn)
         }
     }
 
@@ -100,8 +100,7 @@ final class TransferManager {
             // not just until we resume — e.g. handleTransferRequest calls conn.cancel()
             // later, which fires this same closure again with .cancelled. Without this
             // guard, that second call to cont.resume() is a fatal error (CheckedContinuation
-            // traps on double-resume) — this was the cause of the crash on successful
-            // downloads.
+            // traps on double-resume).
             var hasResumed = false
             conn.stateUpdateHandler = { state in
                 Task { @MainActor in
@@ -123,10 +122,8 @@ final class TransferManager {
             }
             conn.start(queue: .main)
 
-            // Watchdog: an unreachable peer (firewalled, offline, bad IP) can leave the
-            // connection sitting in .waiting forever — stateUpdateHandler never fires a
-            // terminal case, so resume() never gets called and the download is stuck in
-            // "Queued" with no feedback. Time it out instead.
+            // Watchdog: an unreachable peer can leave the connection sitting in .waiting
+            // forever, so resume() never fires and the download is stuck in "Queued".
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard !hasResumed else { return }
@@ -247,28 +244,17 @@ final class TransferManager {
 
     // MARK: - F connection: ticket, FileOffset, raw file bytes
 
-    private func beginReceivingFile(ticket: UInt32, conn: NWConnection) {
-        guard var session = pendingByTicket[ticket] else {
-            DebugLog.shared.log("Incoming file connection with unrecognized ticket:\(ticket)")
-            conn.cancel()
-            return
-        }
-
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let destURL = docs.appendingPathComponent(lastPathComponent(of: session.remotePath))
-        guard FileManager.default.createFile(atPath: destURL.path, contents: nil),
-              let handle = try? FileHandle(forWritingTo: destURL) else {
-            onStateChange?(session.downloadID, .failed(reason: "Could not create local file"))
-            pendingByTicket.removeValue(forKey: ticket)
-            conn.cancel()
-            return
-        }
-        session.fileHandle = handle
-        session.destinationURL = destURL
-        pendingByTicket[ticket] = session
-
+    /// `connectionToken` is the token the server gave us in ConnectToPeer to dial this
+    /// peer and complete PierceFireWall — it is *not* the same number as the transfer
+    /// ticket from TransferRequest. The real ticket only exists as the first 4 raw bytes
+    /// the peer sends once this connection is open, and observed traffic shows it's
+    /// reliably a few counts off from the connection token (they're independent counters
+    /// on the peer's side), so pendingByTicket must be looked up using that value, not
+    /// connectionToken. Using connectionToken here was the bug that made every transfer
+    /// get rejected as "unrecognized ticket" and sit stuck at 0%.
+    private func beginReceivingFile(connectionToken: UInt32, conn: NWConnection) {
         let box = TransferBufferBox()
-        var sentOffset = false
+        var resolvedTicket: UInt32?
 
         func doReceive() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
@@ -278,19 +264,44 @@ final class TransferManager {
                     if let data {
                         box.data.append(data)
 
-                        if !sentOffset {
+                        if resolvedTicket == nil {
                             guard box.data.count >= 4 else {
                                 if isComplete {
-                                    self.finishFailed(ticket: ticket, reason: "Connection closed before file start")
+                                    DebugLog.shared.log("Incoming file connection (connToken:\(connectionToken)) closed before ticket arrived")
+                                    conn.cancel()
                                     return
                                 }
                                 doReceive()
                                 return
                             }
-                            // First 4 bytes are the uploader's FileTransferInit
-                            // ticket (should match, but we already keyed off it).
+
+                            // First 4 bytes are the uploader's FileTransferInit ticket —
+                            // this is the value that actually matches TransferRequest's
+                            // ticket, so resolve the session using it, not connectionToken.
+                            let ticket = box.data.readUInt32(at: 0)
                             box.data = box.data.dropFirst(4)
-                            sentOffset = true
+
+                            guard var session = self.pendingByTicket[ticket] else {
+                                DebugLog.shared.log("Incoming file connection with unrecognized ticket:\(ticket) (connToken:\(connectionToken))")
+                                conn.cancel()
+                                return
+                            }
+                            resolvedTicket = ticket
+
+                            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                            let destURL = docs.appendingPathComponent(self.lastPathComponent(of: session.remotePath))
+                            guard FileManager.default.createFile(atPath: destURL.path, contents: nil),
+                                  let handle = try? FileHandle(forWritingTo: destURL) else {
+                                self.onStateChange?(session.downloadID, .failed(reason: "Could not create local file"))
+                                self.pendingByTicket.removeValue(forKey: ticket)
+                                conn.cancel()
+                                return
+                            }
+                            session.fileHandle = handle
+                            session.destinationURL = destURL
+                            self.pendingByTicket[ticket] = session
+
+                            DebugLog.shared.log("Matched incoming file connection to ticket:\(ticket) (connToken:\(connectionToken)) — writing to \(destURL.lastPathComponent)")
 
                             // FileOffset (uint64) — always 0, no resume support.
                             var offsetMsg = Data()
@@ -299,21 +310,23 @@ final class TransferManager {
                             conn.send(content: offsetMsg, completion: .idempotent)
                         }
 
-                        if !box.data.isEmpty {
+                        if let ticket = resolvedTicket, !box.data.isEmpty {
                             self.appendFileBytes(ticket: ticket, chunk: box.data, conn: conn)
                             box.data = Data()
                         }
                     }
 
                     if error != nil {
-                        self.finishFailed(ticket: ticket, reason: error?.localizedDescription ?? "Connection error")
+                        if let ticket = resolvedTicket {
+                            self.finishFailed(ticket: ticket, reason: error?.localizedDescription ?? "Connection error")
+                        }
                         return
                     }
                     if isComplete {
-                        // Peer closed early. If we already have the full file
-                        // this is the normal "we closed it ourselves" case and
-                        // pendingByTicket[ticket] will already be gone.
-                        if self.pendingByTicket[ticket] != nil {
+                        // Peer closed early. If we already have the full file this is the
+                        // normal "we closed it ourselves" case and pendingByTicket[ticket]
+                        // will already be gone.
+                        if let ticket = resolvedTicket, self.pendingByTicket[ticket] != nil {
                             self.finishFailed(ticket: ticket, reason: "Connection closed before transfer completed")
                         }
                         return
