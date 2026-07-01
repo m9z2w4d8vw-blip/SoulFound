@@ -2,6 +2,8 @@
 
 A download-only Soulseek client for iPhone. Search and download files from the Soulseek network directly to your phone — no computer needed.
 
+## I know this app is shit, SO I DONT NEED YOU TELL ME THAT 😠😠😠😠😠😠
+
 ## Install
 Download ipa from releases and install however u want as long as ur on ios 17.0+ (trollstore, altstore, sideloadly, etc.) 
 
